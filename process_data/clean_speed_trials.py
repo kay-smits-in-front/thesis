@@ -1,8 +1,14 @@
+"""Script to clean and preprocess the speed_trials dataset."""
 import pandas as pd
-from datetime import datetime
+from sklearn.preprocessing import StandardScaler
+from sklearn.metrics import r2_score, mean_squared_error, mean_absolute_error
 
-speed_trials = pd.read_excel(r"/mnt/c/Users/KaySmitsInfront/PycharmProjects/thesis/speed_trials.xlsx", header=None)
+from load_data.speed_trials import SPEED_TRIALS
 
+speed_trials = SPEED_TRIALS
+
+
+print("Initial shape:", speed_trials.shape)
 header_row = speed_trials.iloc[0, 0].split(';')
 header_row = header_row[:len(speed_trials.columns)]
 speed_trials = speed_trials.iloc[2:].reset_index(drop=True)
@@ -78,10 +84,10 @@ for col in speed_trials.columns[:-4]:
 
 print("Removing rows with >50% missing data...")
 threshold = 0.5 * len(speed_trials.columns)
-speed_trials = speed_trials.dropna(thresh=threshold).reset_index(drop=True)
+SPEED_TRIALS_REGULAR = speed_trials.dropna(thresh=threshold).reset_index(drop=True)
 
-print(f"\nFinal shape: {speed_trials.shape}")
+print(f"\nFinal shape: {SPEED_TRIALS_REGULAR.shape}")
 print("\nVerifying chronological order (should be True):")
-print((speed_trials['elapsed_seconds'].diff().dropna() >= 0).all())
+print((SPEED_TRIALS_REGULAR['elapsed_seconds'].diff().dropna() >= 0).all())
 print("\nSample of elapsed_seconds from different parts:")
-print(speed_trials['elapsed_seconds'].iloc[[0, 5000, 10000, 15000, 20000, -1]])
+print(SPEED_TRIALS_REGULAR['elapsed_seconds'].iloc[[0, 5000, 10000, 15000, 20000, -1]])
