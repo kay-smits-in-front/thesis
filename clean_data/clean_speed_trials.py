@@ -1,7 +1,5 @@
 """Script to clean and preprocess the speed_trials dataset."""
 import pandas as pd
-import sys
-import io
 from load_data.speed_trials import SPEED_TRIALS
 
 

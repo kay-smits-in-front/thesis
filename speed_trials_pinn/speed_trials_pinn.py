@@ -1,9 +1,7 @@
 """"Physics-Informed Neural Network (PINN) for solving a simple ODE and measuring training speed."""
 import numpy as np
-import pandas as pd
 import tensorflow as tf
 from tensorflow import keras
-from tensorflow.keras.layers import LSTM, Dense, Dropout
 from tensorflow.keras.optimizers import Adam
 from sklearn.preprocessing import StandardScaler
 from sklearn.metrics import r2_score, mean_squared_error, mean_absolute_error

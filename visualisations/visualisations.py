@@ -1,7 +1,6 @@
 """Visualisations for feature importance and relationships with engine power."""
 
 import matplotlib.pyplot as plt
-import numpy as np
 import pandas as pd
 from clean_data.clean_speed_trials import SPEED_TRIALS_REGULAR
 from clean_data.clean_weather_data import SPEED_TRIALS_WEATHER_CLEAN
