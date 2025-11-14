@@ -1,6 +1,6 @@
-### Thesis Kay Smits 2124368 Tilburg university
+# Thesis Kay Smits 2124368 Tilburg university
 ## How do physics informed neural network improve prediction accuracy (mse) in LSTMs trying to predict thrust power usage?
-# Thesis_Wärtsilä_LSTM_PINN
+### Thesis_Wärtsilä_LSTM_PINN
 
 This repository contains modules for cleaning data.
 This repository contains modules for feature analysis.
