@@ -9,4 +9,5 @@ def load_speed_trials(data_path):
     print("Weather data loaded with shape:", weather_data.shape, )
     return weather_data
 
-WEATHER_DATA = load_speed_trials(DATA_PATH_WEATHER)
+if __name__ == "__main__":
+    WEATHER_DATA = load_speed_trials(DATA_PATH_WEATHER)

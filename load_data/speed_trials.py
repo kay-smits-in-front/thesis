@@ -9,4 +9,5 @@ def load_speed_trials(data_path):
     print("Speed trials data loaded with shape:", speed_trials.shape)
     return speed_trials
 
-SPEED_TRIALS = load_speed_trials(DATA_PATH)
+if __name__ == "__main__":
+    SPEED_TRIALS = load_speed_trials(DATA_PATH)

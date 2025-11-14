@@ -1,10 +1,10 @@
 """Script to clean and preprocess the speed_trials dataset."""
 import pandas as pd
-from load_data.speed_trials import SPEED_TRIALS
+from load_data.speed_trials import load_speed_trials, DATA_PATH
 
 
 def clean_speed_trials(verbose=True):
-    speed_trials = SPEED_TRIALS.copy()
+    speed_trials = load_speed_trials(DATA_PATH).copy()
 
     if verbose:
         print("Initial shape:", speed_trials.shape)
@@ -83,4 +83,5 @@ def clean_speed_trials(verbose=True):
     return speed_trials_clean
 
 
-SPEED_TRIALS_REGULAR = clean_speed_trials(verbose=False)
+if __name__ == "__main__":
+    SPEED_TRIALS_REGULAR = clean_speed_trials(verbose=False)

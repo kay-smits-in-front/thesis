@@ -3,12 +3,12 @@
 from scipy.interpolate import CubicSpline
 import numpy as np
 import pandas as pd
-from load_data.speed_trials import SPEED_TRIALS
-from load_data.weather_data import WEATHER_DATA
+from load_data.speed_trials import load_speed_trials, DATA_PATH
+from load_data.weather_data import load_speed_trials as load_weather_data, DATA_PATH_WEATHER
 
 
 def clean_weather_data(verbose=True):
-	speed_trials_weather = SPEED_TRIALS.copy()
+	speed_trials_weather = load_speed_trials(DATA_PATH).copy()
 
 	header_row = speed_trials_weather.iloc[0, 0].split(';')
 	header_row = header_row[:len(speed_trials_weather.columns)]
@@ -46,7 +46,7 @@ def clean_weather_data(verbose=True):
 	speed_trials_weather['minute'] = datetime_col.dt.minute
 	speed_trials_weather['second'] = datetime_col.dt.second
 
-	weather_data = WEATHER_DATA.copy()
+	weather_data = load_weather_data(DATA_PATH_WEATHER).copy()
 	weather_data['timestamp'] = pd.to_datetime(weather_data['timestamp'], utc=True)
 	weather_data = weather_data.sort_values('timestamp').reset_index(drop=True)
 	weather_numeric_cols = ['mean_wave_direction', 'mean_wave_period', 'significant_wave_height',
@@ -151,4 +151,5 @@ def clean_weather_data(verbose=True):
 	return speed_trials_weather
 
 
-SPEED_TRIALS_WEATHER_CLEAN = clean_weather_data(verbose=False)
+if __name__ == "__main__":
+	SPEED_TRIALS_WEATHER_CLEAN = clean_weather_data(verbose=False)
