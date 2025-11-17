@@ -1,3 +1,6 @@
 /speed_trials.xlsx
 /voortgang modellen.ods
 /Grimaldi_Shanghai_sea_trial_GPS_weather.xlsx
+__pycache__/
+*.pyc
+*.pyo
