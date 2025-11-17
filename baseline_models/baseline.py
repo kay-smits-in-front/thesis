@@ -13,9 +13,9 @@ speed_trials_weather = SPEED_TRIALS_WEATHER_CLEAN
 tracker = CarbonTracker(epochs=1)
 
 # Hyperparameters
-HIDDEN_LAYERS = [48]
+HIDDEN_LAYERS = [64, 32]
 LEARNING_RATE = 0.001
-EPOCHS = 30
+EPOCHS = 100
 BATCH_SIZE = 32
 EARLY_STOPPING_PATIENCE = 10
 
@@ -34,7 +34,7 @@ for epoch in range(1):
     X_train, X_test, y_train, y_test = train_test_split(X, y, test_size=0.2, random_state=42)
 
     model = tf.keras.Sequential([
-        tf.keras.layers.Dense(HIDDEN_LAYERS[0], activation='Adam', input_shape=(X_train.shape[1],)),
+        tf.keras.layers.Dense(HIDDEN_LAYERS[0], activation='relu', input_shape=(X_train.shape[1],)),
         tf.keras.layers.Dense(1)
     ])
 
@@ -86,7 +86,7 @@ for epoch in range(1):
     X_train, X_test, y_train, y_test = train_test_split(X, y, test_size=0.2, random_state=42)
 
     model = tf.keras.Sequential([
-        tf.keras.layers.Dense(HIDDEN_LAYERS[0], activation='Adam', input_shape=(X_train.shape[1],)),
+        tf.keras.layers.Dense(HIDDEN_LAYERS[0], activation='relu', input_shape=(X_train.shape[1],)),
         tf.keras.layers.Dense(1)
     ])
 
