@@ -11,6 +11,8 @@ This script performs:
 import os
 import numpy as np
 import pandas as pd
+import matplotlib
+matplotlib.use('Agg')  # Use non-interactive backend for saving figures
 import matplotlib.pyplot as plt
 import seaborn as sns
 from scipy import stats
@@ -27,7 +29,9 @@ sns.set_style("whitegrid")
 plt.rcParams['figure.figsize'] = (12, 8)
 plt.rcParams['font.size'] = 10
 
-OUTPUT_DIR = "/home/user/thesis/output"
+# Get the project root directory (parent of analysis folder)
+PROJECT_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+OUTPUT_DIR = os.path.join(PROJECT_ROOT, "output")
 os.makedirs(OUTPUT_DIR, exist_ok=True)
 
 
