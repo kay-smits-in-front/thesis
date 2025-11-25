@@ -1,619 +1,387 @@
-"""Comprehensive data analysis script for speed trials data.
-
-This script performs:
-1. Outlier detection (IQR, Z-score, Isolation Forest)
-2. Anomaly detection (LOF, One-Class SVM)
-3. Distribution analysis (histograms, box plots, Q-Q plots, KDE)
-4. Time series analysis of output features
-5. Additional visualizations for better understanding
-"""
+"""Data analysis: features, anomaly detection, comparison."""
 
 import os
 import numpy as np
 import pandas as pd
 import matplotlib
-matplotlib.use('Agg')  # Use non-interactive backend for saving figures
+matplotlib.use('Agg')
 import matplotlib.pyplot as plt
 import seaborn as sns
-from scipy import stats
-from sklearn.ensemble import IsolationForest
-from sklearn.neighbors import LocalOutlierFactor
-from sklearn.svm import OneClassSVM
+from sklearn.ensemble import IsolationForest, RandomForestRegressor
 from sklearn.preprocessing import StandardScaler
+from sklearn.neighbors import LocalOutlierFactor
+from sklearn.decomposition import PCA
 import warnings
 
 warnings.filterwarnings('ignore')
-
-# Set style for better-looking plots
 sns.set_style("whitegrid")
-plt.rcParams['figure.figsize'] = (12, 8)
-plt.rcParams['font.size'] = 10
 
-# Get the project root directory (parent of analysis folder)
 PROJECT_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 OUTPUT_DIR = os.path.join(PROJECT_ROOT, "output")
 os.makedirs(OUTPUT_DIR, exist_ok=True)
 
 
 class DataAnalyzer:
-    """Comprehensive data analyzer for speed trials data."""
+    """Analyzer for features and anomaly detection."""
 
     def __init__(self, data, dataset_name, target_col='OPC_12_CPP_ENGINE_POWER'):
-        """
-        Initialize the analyzer.
-
-        Args:
-            data: DataFrame containing the data
-            dataset_name: Name of the dataset (for file naming)
-            target_col: Name of the target/output column
-        """
         self.data = data.copy()
         self.dataset_name = dataset_name
         self.target_col = target_col
         self.output_dir = os.path.join(OUTPUT_DIR, dataset_name)
         os.makedirs(self.output_dir, exist_ok=True)
 
-        # Select only numeric columns for analysis
-        self.numeric_data = self.data.select_dtypes(include=[np.number])
+        self.exclude_cols = ["OPC_41_PITCH_FB", "OPC_13_PROP_POWER", "PROP_SHAFT_POWER_KMT", "OPC_08_GROUND_SPEED",
+                             "elapsed_seconds", "hour", "minute", "second", "dataset_id",
+                             "GPS_GPGGA_Latitude", "GPS_GPGGA_Longitude", "GPS_GPGGA_UTC_time"]
+
+        self.numeric_data_all = self.data.select_dtypes(include=[np.number])
+        self.numeric_data_filtered = self.numeric_data_all.drop(columns=self.exclude_cols, errors='ignore')
 
         print(f"\n{'='*70}")
-        print(f"ANALYZING DATASET: {dataset_name}")
+        print(f"ANALYZING: {dataset_name}")
         print(f"{'='*70}")
         print(f"Shape: {self.data.shape}")
-        print(f"Numeric columns: {len(self.numeric_data.columns)}")
-        print(f"Target column: {self.target_col}")
-
-    def detect_outliers_iqr(self, threshold=1.5):
-        """Detect outliers using Interquartile Range (IQR) method."""
-        print(f"\n{'-'*70}")
-        print("OUTLIER DETECTION: IQR Method")
-        print(f"{'-'*70}")
-
-        outliers_summary = {}
-
-        fig, axes = plt.subplots(4, 3, figsize=(18, 16))
-        axes = axes.flatten()
-
-        for idx, col in enumerate(self.numeric_data.columns[:12]):
-            if idx >= 12:
-                break
-
-            Q1 = self.numeric_data[col].quantile(0.25)
-            Q3 = self.numeric_data[col].quantile(0.75)
-            IQR = Q3 - Q1
-
-            lower_bound = Q1 - threshold * IQR
-            upper_bound = Q3 + threshold * IQR
-
-            outliers = self.numeric_data[(self.numeric_data[col] < lower_bound) |
-                                         (self.numeric_data[col] > upper_bound)]
-
-            outliers_summary[col] = {
-                'count': len(outliers),
-                'percentage': (len(outliers) / len(self.numeric_data)) * 100,
-                'lower_bound': lower_bound,
-                'upper_bound': upper_bound
-            }
-
-            # Plot
-            ax = axes[idx]
-            ax.boxplot(self.numeric_data[col].dropna(), vert=True)
-            ax.set_title(f'{col}\n{len(outliers)} outliers ({outliers_summary[col]["percentage"]:.2f}%)',
-                        fontsize=9)
-            ax.set_ylabel('Value')
-            ax.grid(True, alpha=0.3)
-
-        # Hide unused subplots
-        for idx in range(len(self.numeric_data.columns[:12]), 12):
-            axes[idx].axis('off')
-
-        plt.tight_layout()
-        plt.savefig(os.path.join(self.output_dir, 'outliers_iqr_boxplots.png'),
-                   dpi=300, bbox_inches='tight')
-        plt.close()
-
-        # Print summary
-        print(f"\nOutliers detected (threshold={threshold}):")
-        for col, summary in outliers_summary.items():
-            print(f"  {col}: {summary['count']} ({summary['percentage']:.2f}%)")
-
-        return outliers_summary
-
-    def detect_outliers_zscore(self, threshold=3):
-        """Detect outliers using Z-score method."""
-        print(f"\n{'-'*70}")
-        print(f"OUTLIER DETECTION: Z-Score Method (threshold={threshold})")
-        print(f"{'-'*70}")
-
-        outliers_summary = {}
-
-        fig, axes = plt.subplots(4, 3, figsize=(18, 16))
-        axes = axes.flatten()
-
-        for idx, col in enumerate(self.numeric_data.columns[:12]):
-            if idx >= 12:
-                break
-
-            z_scores = np.abs(stats.zscore(self.numeric_data[col].dropna()))
-            outliers_mask = z_scores > threshold
-            outliers_count = outliers_mask.sum()
-
-            outliers_summary[col] = {
-                'count': outliers_count,
-                'percentage': (outliers_count / len(self.numeric_data)) * 100
-            }
-
-            # Plot
-            ax = axes[idx]
-            ax.hist(z_scores, bins=50, edgecolor='black', alpha=0.7)
-            ax.axvline(threshold, color='red', linestyle='--', linewidth=2, label=f'Threshold={threshold}')
-            ax.set_title(f'{col}\n{outliers_count} outliers ({outliers_summary[col]["percentage"]:.2f}%)',
-                        fontsize=9)
-            ax.set_xlabel('Z-Score')
-            ax.set_ylabel('Frequency')
-            ax.legend()
-            ax.grid(True, alpha=0.3)
-
-        # Hide unused subplots
-        for idx in range(len(self.numeric_data.columns[:12]), 12):
-            axes[idx].axis('off')
-
-        plt.tight_layout()
-        plt.savefig(os.path.join(self.output_dir, 'outliers_zscore_histograms.png'),
-                   dpi=300, bbox_inches='tight')
-        plt.close()
-
-        # Print summary
-        print(f"\nOutliers detected:")
-        for col, summary in outliers_summary.items():
-            print(f"  {col}: {summary['count']} ({summary['percentage']:.2f}%)")
-
-        return outliers_summary
-
-    def detect_anomalies_isolation_forest(self, contamination=0.1):
-        """Detect anomalies using Isolation Forest."""
-        print(f"\n{'-'*70}")
-        print(f"ANOMALY DETECTION: Isolation Forest (contamination={contamination})")
-        print(f"{'-'*70}")
-
-        # Prepare data
-        data_clean = self.numeric_data.dropna()
-
-        if len(data_clean) == 0:
-            print("No data available after removing NaN values")
-            return None
-
-        # Scale the data
-        scaler = StandardScaler()
-        data_scaled = scaler.fit_transform(data_clean)
-
-        # Fit Isolation Forest
-        iso_forest = IsolationForest(contamination=contamination, random_state=42)
-        predictions = iso_forest.fit_predict(data_scaled)
-
-        # -1 for anomalies, 1 for normal
-        anomalies_mask = predictions == -1
-        anomalies_count = anomalies_mask.sum()
-
-        print(f"Anomalies detected: {anomalies_count} ({(anomalies_count/len(data_clean))*100:.2f}%)")
-
-        # Visualize anomalies in 2D using first two principal components
-        from sklearn.decomposition import PCA
-
-        pca = PCA(n_components=2)
-        data_pca = pca.fit_transform(data_scaled)
-
-        plt.figure(figsize=(12, 8))
-        plt.scatter(data_pca[~anomalies_mask, 0], data_pca[~anomalies_mask, 1],
-                   c='blue', alpha=0.5, label='Normal', s=20)
-        plt.scatter(data_pca[anomalies_mask, 0], data_pca[anomalies_mask, 1],
-                   c='red', alpha=0.8, label='Anomaly', s=50, marker='x')
-        plt.xlabel(f'PC1 ({pca.explained_variance_ratio_[0]*100:.1f}% variance)')
-        plt.ylabel(f'PC2 ({pca.explained_variance_ratio_[1]*100:.1f}% variance)')
-        plt.title(f'Isolation Forest: Anomaly Detection\n{anomalies_count} anomalies detected')
-        plt.legend()
-        plt.grid(True, alpha=0.3)
-        plt.tight_layout()
-        plt.savefig(os.path.join(self.output_dir, 'anomalies_isolation_forest.png'),
-                   dpi=300, bbox_inches='tight')
-        plt.close()
-
-        return {'anomalies_count': anomalies_count,
-                'anomalies_percentage': (anomalies_count/len(data_clean))*100,
-                'anomalies_indices': data_clean.index[anomalies_mask].tolist()}
-
-    def detect_anomalies_lof(self, n_neighbors=20):
-        """Detect anomalies using Local Outlier Factor."""
-        print(f"\n{'-'*70}")
-        print(f"ANOMALY DETECTION: Local Outlier Factor (n_neighbors={n_neighbors})")
-        print(f"{'-'*70}")
-
-        # Prepare data
-        data_clean = self.numeric_data.dropna()
-
-        if len(data_clean) == 0:
-            print("No data available after removing NaN values")
-            return None
-
-        # Scale the data
-        scaler = StandardScaler()
-        data_scaled = scaler.fit_transform(data_clean)
-
-        # Fit LOF
-        lof = LocalOutlierFactor(n_neighbors=n_neighbors)
-        predictions = lof.fit_predict(data_scaled)
-
-        # -1 for anomalies, 1 for normal
-        anomalies_mask = predictions == -1
-        anomalies_count = anomalies_mask.sum()
-
-        print(f"Anomalies detected: {anomalies_count} ({(anomalies_count/len(data_clean))*100:.2f}%)")
-
-        # Visualize anomalies in 2D using first two principal components
-        from sklearn.decomposition import PCA
-
-        pca = PCA(n_components=2)
-        data_pca = pca.fit_transform(data_scaled)
-
-        plt.figure(figsize=(12, 8))
-        plt.scatter(data_pca[~anomalies_mask, 0], data_pca[~anomalies_mask, 1],
-                   c='blue', alpha=0.5, label='Normal', s=20)
-        plt.scatter(data_pca[anomalies_mask, 0], data_pca[anomalies_mask, 1],
-                   c='red', alpha=0.8, label='Anomaly', s=50, marker='x')
-        plt.xlabel(f'PC1 ({pca.explained_variance_ratio_[0]*100:.1f}% variance)')
-        plt.ylabel(f'PC2 ({pca.explained_variance_ratio_[1]*100:.1f}% variance)')
-        plt.title(f'Local Outlier Factor: Anomaly Detection\n{anomalies_count} anomalies detected')
-        plt.legend()
-        plt.grid(True, alpha=0.3)
-        plt.tight_layout()
-        plt.savefig(os.path.join(self.output_dir, 'anomalies_lof.png'),
-                   dpi=300, bbox_inches='tight')
-        plt.close()
-
-        return {'anomalies_count': anomalies_count,
-                'anomalies_percentage': (anomalies_count/len(data_clean))*100,
-                'anomalies_indices': data_clean.index[anomalies_mask].tolist()}
-
-    def analyze_distributions(self):
-        """Analyze and visualize distributions of all numeric features."""
-        print(f"\n{'-'*70}")
-        print("DISTRIBUTION ANALYSIS")
-        print(f"{'-'*70}")
-
-        # Histograms with KDE
-        n_cols = min(12, len(self.numeric_data.columns))
-        fig, axes = plt.subplots(4, 3, figsize=(18, 16))
-        axes = axes.flatten()
-
-        for idx, col in enumerate(self.numeric_data.columns[:n_cols]):
-            ax = axes[idx]
-            data_clean = self.numeric_data[col].dropna()
-
-            ax.hist(data_clean, bins=50, edgecolor='black', alpha=0.7, density=True, label='Histogram')
-
-            # Add KDE
-            try:
-                kde_x = np.linspace(data_clean.min(), data_clean.max(), 200)
-                kde = stats.gaussian_kde(data_clean)
-                ax.plot(kde_x, kde(kde_x), 'r-', linewidth=2, label='KDE')
-            except:
-                pass
-
-            ax.set_title(f'{col}\nMean={data_clean.mean():.2f}, Std={data_clean.std():.2f}',
-                        fontsize=9)
-            ax.set_xlabel('Value')
-            ax.set_ylabel('Density')
-            ax.legend(fontsize=8)
-            ax.grid(True, alpha=0.3)
-
-        # Hide unused subplots
-        for idx in range(n_cols, 12):
-            axes[idx].axis('off')
-
-        plt.tight_layout()
-        plt.savefig(os.path.join(self.output_dir, 'distributions_histograms_kde.png'),
-                   dpi=300, bbox_inches='tight')
-        plt.close()
-
-        # Q-Q plots
-        fig, axes = plt.subplots(4, 3, figsize=(18, 16))
-        axes = axes.flatten()
-
-        for idx, col in enumerate(self.numeric_data.columns[:n_cols]):
-            ax = axes[idx]
-            data_clean = self.numeric_data[col].dropna()
-
-            stats.probplot(data_clean, dist="norm", plot=ax)
-            ax.set_title(f'{col}\nQ-Q Plot', fontsize=9)
-            ax.grid(True, alpha=0.3)
-
-        # Hide unused subplots
-        for idx in range(n_cols, 12):
-            axes[idx].axis('off')
-
-        plt.tight_layout()
-        plt.savefig(os.path.join(self.output_dir, 'distributions_qq_plots.png'),
-                   dpi=300, bbox_inches='tight')
-        plt.close()
-
-        # Violin plots
-        fig, axes = plt.subplots(4, 3, figsize=(18, 16))
-        axes = axes.flatten()
-
-        for idx, col in enumerate(self.numeric_data.columns[:n_cols]):
-            ax = axes[idx]
-            data_clean = self.numeric_data[col].dropna()
-
-            parts = ax.violinplot([data_clean], positions=[0], showmeans=True, showmedians=True)
-            ax.set_title(f'{col}', fontsize=9)
-            ax.set_ylabel('Value')
-            ax.grid(True, alpha=0.3)
-            ax.set_xticks([])
-
-        # Hide unused subplots
-        for idx in range(n_cols, 12):
-            axes[idx].axis('off')
-
-        plt.tight_layout()
-        plt.savefig(os.path.join(self.output_dir, 'distributions_violin_plots.png'),
-                   dpi=300, bbox_inches='tight')
-        plt.close()
-
-        print("Distribution analysis completed")
+        print(f"All numeric features: {len(self.numeric_data_all.columns)}")
+        print(f"Filtered features: {len(self.numeric_data_filtered.columns)}")
+        print(f"Target: {self.target_col}")
 
     def plot_target_over_time(self):
-        """Plot the target/output feature over time."""
+        """Plot target variable over time."""
         print(f"\n{'-'*70}")
-        print(f"TIME SERIES ANALYSIS: {self.target_col}")
+        print("TARGET OVER TIME")
         print(f"{'-'*70}")
 
         if self.target_col not in self.data.columns:
-            print(f"Target column '{self.target_col}' not found in data")
+            print(f"Target {self.target_col} not found")
             return
-
-        # Check if there's a time column
-        time_cols = ['elapsed_seconds', 'datetime_parsed', 'timestamp']
-        time_col = None
-        for col in time_cols:
-            if col in self.data.columns:
-                time_col = col
-                break
-
-        if time_col is None:
-            # Use index as time
-            time_data = self.data.index
-            xlabel = 'Index'
-        else:
-            time_data = self.data[time_col]
-            xlabel = time_col
 
         target_data = self.data[self.target_col].dropna()
 
-        # Main time series plot
-        fig, axes = plt.subplots(3, 1, figsize=(16, 12))
+        plt.figure(figsize=(16, 6))
+        plt.plot(target_data.index, target_data.values, linewidth=0.5, alpha=0.7, color='steelblue')
+        plt.xlabel('Index')
+        plt.ylabel(self.target_col)
+        plt.title(f'{self.target_col} Over Time')
+        plt.grid(True, alpha=0.3)
+        plt.tight_layout()
+        plt.savefig(os.path.join(self.output_dir, '01_target_over_time.png'), dpi=300, bbox_inches='tight')
+        plt.close()
 
-        # Full time series
+        print(f"Saved: 01_target_over_time.png")
+
+    def feature_importance_comparison(self):
+        """Feature importance: all features vs filtered features."""
+        print(f"\n{'-'*70}")
+        print("FEATURE IMPORTANCE COMPARISON")
+        print(f"{'-'*70}")
+
+        fig, axes = plt.subplots(1, 2, figsize=(20, 10))
+
+        # All features
         ax = axes[0]
-        if time_col is None:
-            ax.plot(target_data.index, target_data.values, linewidth=0.5, alpha=0.7)
-        else:
-            ax.plot(time_data[target_data.index], target_data.values, linewidth=0.5, alpha=0.7)
-        ax.set_title(f'{self.target_col} Over Time (Full Series)', fontsize=12, fontweight='bold')
-        ax.set_xlabel(xlabel)
-        ax.set_ylabel(self.target_col)
-        ax.grid(True, alpha=0.3)
+        top_all = self._calc_feature_importance(self.numeric_data_all, ax, "All Features (before exclusion)")
 
-        # Rolling statistics
+        # Filtered features
         ax = axes[1]
-        window = min(100, len(target_data) // 10)
-        rolling_mean = target_data.rolling(window=window).mean()
-        rolling_std = target_data.rolling(window=window).std()
+        top_filtered = self._calc_feature_importance(self.numeric_data_filtered, ax, "Filtered Features (after exclusion)")
 
-        if time_col is None:
-            ax.plot(target_data.index, target_data.values, linewidth=0.5, alpha=0.3, label='Original')
-            ax.plot(rolling_mean.index, rolling_mean.values, 'r-', linewidth=2, label=f'Rolling Mean (window={window})')
-            ax.fill_between(rolling_mean.index,
-                           (rolling_mean - rolling_std).values,
-                           (rolling_mean + rolling_std).values,
-                           alpha=0.2, color='red', label='±1 Std Dev')
-        else:
-            ax.plot(time_data[target_data.index], target_data.values, linewidth=0.5, alpha=0.3, label='Original')
-            ax.plot(time_data[rolling_mean.index], rolling_mean.values, 'r-', linewidth=2, label=f'Rolling Mean (window={window})')
+        plt.tight_layout()
+        plt.savefig(os.path.join(self.output_dir, '02_feature_importance_comparison.png'), dpi=300, bbox_inches='tight')
+        plt.close()
 
-        ax.set_title(f'{self.target_col} with Rolling Statistics', fontsize=12, fontweight='bold')
-        ax.set_xlabel(xlabel)
-        ax.set_ylabel(self.target_col)
+        print(f"Saved: 02_feature_importance_comparison.png")
+
+        return top_filtered
+
+    def _calc_feature_importance(self, data, ax, title):
+        """Calculate and plot feature importance."""
+        if self.target_col not in data.columns:
+            ax.text(0.5, 0.5, 'Target not found', ha='center', va='center')
+            return None
+
+        X = data.drop(columns=[self.target_col], errors='ignore')
+        y = data[self.target_col]
+
+        valid_mask = ~(X.isna().any(axis=1) | y.isna())
+        X_clean = X[valid_mask]
+        y_clean = y[valid_mask]
+
+        if len(X_clean) < 100:
+            ax.text(0.5, 0.5, 'Not enough data', ha='center', va='center')
+            return None
+
+        rf = RandomForestRegressor(n_estimators=100, random_state=42, n_jobs=-1)
+        rf.fit(X_clean, y_clean)
+
+        importance_df = pd.DataFrame({
+            'feature': X_clean.columns,
+            'importance': rf.feature_importances_
+        }).sort_values('importance', ascending=False)
+
+        top_10 = importance_df.head(10)
+
+        ax.barh(range(len(top_10)), top_10['importance'].values, color='steelblue')
+        ax.set_yticks(range(len(top_10)))
+        ax.set_yticklabels(top_10['feature'].values)
+        ax.set_xlabel('Importance')
+        ax.set_title(title)
+        ax.invert_yaxis()
+        ax.grid(True, alpha=0.3)
+
+        return top_10
+
+    def detect_anomalies_isolation_forest(self, contamination=0.05):
+        """Detect anomalies using Isolation Forest."""
+        print(f"\n{'-'*70}")
+        print("ANOMALY DETECTION: Isolation Forest")
+        print(f"{'-'*70}")
+
+        data_clean = self.numeric_data_filtered.dropna()
+
+        if len(data_clean) < 100:
+            print("Not enough data")
+            return None, None
+
+        scaler = StandardScaler()
+        data_scaled = scaler.fit_transform(data_clean)
+
+        iso_forest = IsolationForest(contamination=contamination, random_state=42, n_jobs=-1)
+        predictions = iso_forest.fit_predict(data_scaled)
+        anomaly_scores = iso_forest.decision_function(data_scaled)
+
+        anomalies = predictions == -1
+        anomaly_count = anomalies.sum()
+
+        print(f"Anomalies detected: {anomaly_count} ({(anomaly_count/len(data_clean))*100:.2f}%)")
+
+        # PCA for visualization
+        pca = PCA(n_components=2)
+        data_pca = pca.fit_transform(data_scaled)
+
+        fig, axes = plt.subplots(1, 2, figsize=(16, 6))
+
+        # PCA scatter
+        ax = axes[0]
+        ax.scatter(data_pca[~anomalies, 0], data_pca[~anomalies, 1], c='blue', alpha=0.5, s=20, label='Normal')
+        ax.scatter(data_pca[anomalies, 0], data_pca[anomalies, 1], c='red', alpha=0.8, s=50, marker='x', label='Anomaly')
+        ax.set_xlabel(f'PC1 ({pca.explained_variance_ratio_[0]*100:.1f}%)')
+        ax.set_ylabel(f'PC2 ({pca.explained_variance_ratio_[1]*100:.1f}%)')
+        ax.set_title(f'Isolation Forest: {anomaly_count} anomalies')
         ax.legend()
         ax.grid(True, alpha=0.3)
 
-        # Distribution
-        ax = axes[2]
-        ax.hist(target_data.values, bins=50, edgecolor='black', alpha=0.7, density=True)
-
-        # Add KDE
-        try:
-            kde_x = np.linspace(target_data.min(), target_data.max(), 200)
-            kde = stats.gaussian_kde(target_data)
-            ax.plot(kde_x, kde(kde_x), 'r-', linewidth=2, label='KDE')
-        except:
-            pass
-
-        ax.set_title(f'{self.target_col} Distribution', fontsize=12, fontweight='bold')
-        ax.set_xlabel(self.target_col)
-        ax.set_ylabel('Density')
+        # Anomaly score distribution
+        ax = axes[1]
+        ax.hist(anomaly_scores, bins=50, edgecolor='black', alpha=0.7)
+        ax.axvline(np.percentile(anomaly_scores, contamination*100), color='red', linestyle='--',
+                   linewidth=2, label=f'Threshold (bottom {contamination*100:.0f}%)')
+        ax.set_xlabel('Anomaly Score')
+        ax.set_ylabel('Frequency')
+        ax.set_title('Anomaly Score Distribution')
         ax.legend()
         ax.grid(True, alpha=0.3)
 
         plt.tight_layout()
-        plt.savefig(os.path.join(self.output_dir, 'target_time_series.png'),
-                   dpi=300, bbox_inches='tight')
+        plt.savefig(os.path.join(self.output_dir, '03_anomaly_isolation_forest.png'), dpi=300, bbox_inches='tight')
         plt.close()
 
-        print(f"Time series plot saved")
+        print(f"Saved: 03_anomaly_isolation_forest.png")
 
-    def create_correlation_heatmap(self):
-        """Create correlation heatmap for numeric features."""
+        return anomalies, data_clean.index[anomalies].tolist()
+
+    def detect_anomalies_lof(self, n_neighbors=20, contamination=0.05):
+        """Detect anomalies using Local Outlier Factor."""
         print(f"\n{'-'*70}")
-        print("CORRELATION ANALYSIS")
+        print("ANOMALY DETECTION: Local Outlier Factor")
         print(f"{'-'*70}")
 
-        # Select subset of columns if too many
-        max_cols = 20
-        if len(self.numeric_data.columns) > max_cols:
-            cols_to_use = self.numeric_data.columns[:max_cols]
-            print(f"Using first {max_cols} columns for correlation analysis")
-        else:
-            cols_to_use = self.numeric_data.columns
+        data_clean = self.numeric_data_filtered.dropna()
 
-        corr_matrix = self.numeric_data[cols_to_use].corr()
+        if len(data_clean) < 100:
+            print("Not enough data")
+            return None, None
 
-        plt.figure(figsize=(14, 12))
-        sns.heatmap(corr_matrix, annot=False, cmap='coolwarm', center=0,
-                   square=True, linewidths=0.5, cbar_kws={"shrink": 0.8})
-        plt.title('Correlation Heatmap', fontsize=14, fontweight='bold')
-        plt.tight_layout()
-        plt.savefig(os.path.join(self.output_dir, 'correlation_heatmap.png'),
-                   dpi=300, bbox_inches='tight')
-        plt.close()
+        scaler = StandardScaler()
+        data_scaled = scaler.fit_transform(data_clean)
 
-        # Find highly correlated features
-        high_corr_threshold = 0.8
-        high_corr_pairs = []
-        for i in range(len(corr_matrix.columns)):
-            for j in range(i+1, len(corr_matrix.columns)):
-                if abs(corr_matrix.iloc[i, j]) > high_corr_threshold:
-                    high_corr_pairs.append((corr_matrix.columns[i],
-                                          corr_matrix.columns[j],
-                                          corr_matrix.iloc[i, j]))
+        lof = LocalOutlierFactor(n_neighbors=n_neighbors, contamination=contamination, n_jobs=-1)
+        predictions = lof.fit_predict(data_scaled)
+        lof_scores = -lof.negative_outlier_factor_
 
-        if high_corr_pairs:
-            print(f"\nHighly correlated pairs (|r| > {high_corr_threshold}):")
-            for col1, col2, corr_val in high_corr_pairs[:10]:
-                print(f"  {col1} <-> {col2}: {corr_val:.3f}")
+        anomalies = predictions == -1
+        anomaly_count = anomalies.sum()
 
-        print("Correlation analysis completed")
+        print(f"Anomalies detected: {anomaly_count} ({(anomaly_count/len(data_clean))*100:.2f}%)")
 
-    def create_additional_visualizations(self):
-        """Create additional visualizations for better understanding."""
-        print(f"\n{'-'*70}")
-        print("ADDITIONAL VISUALIZATIONS")
-        print(f"{'-'*70}")
+        # PCA for visualization
+        pca = PCA(n_components=2)
+        data_pca = pca.fit_transform(data_scaled)
 
-        # Statistical summary
-        summary_stats = self.numeric_data.describe()
+        fig, axes = plt.subplots(1, 2, figsize=(16, 6))
 
-        fig, axes = plt.subplots(2, 2, figsize=(16, 12))
-
-        # Plot 1: Missing values
-        ax = axes[0, 0]
-        missing_pct = (self.numeric_data.isnull().sum() / len(self.numeric_data)) * 100
-        missing_pct = missing_pct[missing_pct > 0].sort_values(ascending=False)[:20]
-
-        if len(missing_pct) > 0:
-            missing_pct.plot(kind='barh', ax=ax, color='coral')
-            ax.set_title('Missing Values (%)', fontsize=12, fontweight='bold')
-            ax.set_xlabel('Percentage Missing')
-            ax.grid(True, alpha=0.3)
-        else:
-            ax.text(0.5, 0.5, 'No missing values', ha='center', va='center', fontsize=14)
-            ax.axis('off')
-
-        # Plot 2: Feature ranges (normalized)
-        ax = axes[0, 1]
-        data_normalized = (self.numeric_data - self.numeric_data.min()) / (self.numeric_data.max() - self.numeric_data.min())
-        data_normalized.iloc[:, :10].boxplot(ax=ax, rot=90)
-        ax.set_title('Feature Ranges (Normalized)', fontsize=12, fontweight='bold')
-        ax.set_ylabel('Normalized Value [0, 1]')
+        # PCA scatter
+        ax = axes[0]
+        ax.scatter(data_pca[~anomalies, 0], data_pca[~anomalies, 1], c='blue', alpha=0.5, s=20, label='Normal')
+        ax.scatter(data_pca[anomalies, 0], data_pca[anomalies, 1], c='red', alpha=0.8, s=50, marker='x', label='Anomaly')
+        ax.set_xlabel(f'PC1 ({pca.explained_variance_ratio_[0]*100:.1f}%)')
+        ax.set_ylabel(f'PC2 ({pca.explained_variance_ratio_[1]*100:.1f}%)')
+        ax.set_title(f'LOF: {anomaly_count} anomalies')
+        ax.legend()
         ax.grid(True, alpha=0.3)
 
-        # Plot 3: Data density over time
-        ax = axes[1, 0]
-        if 'elapsed_seconds' in self.data.columns:
-            time_bins = pd.cut(self.data['elapsed_seconds'], bins=50)
-            counts = time_bins.value_counts().sort_index()
-            ax.bar(range(len(counts)), counts.values, alpha=0.7, color='steelblue')
-            ax.set_title('Data Density Over Time', fontsize=12, fontweight='bold')
-            ax.set_xlabel('Time Bin')
-            ax.set_ylabel('Number of Records')
-            ax.grid(True, alpha=0.3)
-        else:
-            ax.text(0.5, 0.5, 'No time data available', ha='center', va='center', fontsize=14)
-            ax.axis('off')
-
-        # Plot 4: Skewness
-        ax = axes[1, 1]
-        skewness = self.numeric_data.skew().sort_values(ascending=False)[:20]
-        skewness.plot(kind='barh', ax=ax, color='lightgreen')
-        ax.set_title('Feature Skewness (Top 20)', fontsize=12, fontweight='bold')
-        ax.set_xlabel('Skewness')
-        ax.axvline(0, color='black', linestyle='--', linewidth=1)
+        # LOF score distribution
+        ax = axes[1]
+        ax.hist(lof_scores, bins=50, edgecolor='black', alpha=0.7)
+        ax.axvline(np.percentile(lof_scores, (1-contamination)*100), color='red', linestyle='--',
+                   linewidth=2, label=f'Threshold (top {contamination*100:.0f}%)')
+        ax.set_xlabel('LOF Score')
+        ax.set_ylabel('Frequency')
+        ax.set_title('LOF Score Distribution')
+        ax.legend()
         ax.grid(True, alpha=0.3)
 
         plt.tight_layout()
-        plt.savefig(os.path.join(self.output_dir, 'additional_visualizations.png'),
-                   dpi=300, bbox_inches='tight')
+        plt.savefig(os.path.join(self.output_dir, '04_anomaly_lof.png'), dpi=300, bbox_inches='tight')
         plt.close()
 
-        print("Additional visualizations completed")
+        print(f"Saved: 04_anomaly_lof.png")
 
-    def run_complete_analysis(self):
-        """Run the complete analysis pipeline."""
+        return anomalies, data_clean.index[anomalies].tolist()
+
+    def compare_anomalies(self, iso_anomalies, lof_anomalies):
+        """Compare anomalies detected by both methods."""
+        print(f"\n{'-'*70}")
+        print("ANOMALY COMPARISON")
+        print(f"{'-'*70}")
+
+        if iso_anomalies is None or lof_anomalies is None:
+            print("Cannot compare - missing anomaly data")
+            return
+
+        data_clean = self.numeric_data_filtered.dropna()
+
+        # Overlap
+        both = iso_anomalies & lof_anomalies
+        only_iso = iso_anomalies & ~lof_anomalies
+        only_lof = ~iso_anomalies & lof_anomalies
+        neither = ~iso_anomalies & ~lof_anomalies
+
+        both_count = both.sum()
+        only_iso_count = only_iso.sum()
+        only_lof_count = only_lof.sum()
+        neither_count = neither.sum()
+
+        print(f"Both methods: {both_count}")
+        print(f"Only Isolation Forest: {only_iso_count}")
+        print(f"Only LOF: {only_lof_count}")
+        print(f"Neither (normal): {neither_count}")
+
+        # PCA for visualization
+        scaler = StandardScaler()
+        data_scaled = scaler.fit_transform(data_clean)
+        pca = PCA(n_components=2)
+        data_pca = pca.fit_transform(data_scaled)
+
+        fig, axes = plt.subplots(1, 2, figsize=(16, 6))
+
+        # Comparison scatter
+        ax = axes[0]
+        ax.scatter(data_pca[neither, 0], data_pca[neither, 1], c='blue', alpha=0.3, s=20, label=f'Normal ({neither_count})')
+        ax.scatter(data_pca[only_iso, 0], data_pca[only_iso, 1], c='orange', alpha=0.7, s=40, label=f'Only IF ({only_iso_count})')
+        ax.scatter(data_pca[only_lof, 0], data_pca[only_lof, 1], c='green', alpha=0.7, s=40, label=f'Only LOF ({only_lof_count})')
+        ax.scatter(data_pca[both, 0], data_pca[both, 1], c='red', alpha=0.9, s=60, marker='x', label=f'Both ({both_count})')
+        ax.set_xlabel(f'PC1 ({pca.explained_variance_ratio_[0]*100:.1f}%)')
+        ax.set_ylabel(f'PC2 ({pca.explained_variance_ratio_[1]*100:.1f}%)')
+        ax.set_title('Anomaly Comparison')
+        ax.legend()
+        ax.grid(True, alpha=0.3)
+
+        # Venn-style summary
+        ax = axes[1]
+        categories = ['Both Methods', 'Only IF', 'Only LOF', 'Normal']
+        counts = [both_count, only_iso_count, only_lof_count, neither_count]
+        colors = ['red', 'orange', 'green', 'blue']
+
+        bars = ax.bar(categories, counts, color=colors, alpha=0.7, edgecolor='black')
+        ax.set_ylabel('Count')
+        ax.set_title('Anomaly Detection Summary')
+        ax.grid(True, alpha=0.3, axis='y')
+
+        for bar, count in zip(bars, counts):
+            ax.text(bar.get_x() + bar.get_width()/2, bar.get_height() + 50,
+                    f'{count}\n({count/len(data_clean)*100:.1f}%)',
+                    ha='center', va='bottom', fontsize=10)
+
+        plt.tight_layout()
+        plt.savefig(os.path.join(self.output_dir, '05_anomaly_comparison.png'), dpi=300, bbox_inches='tight')
+        plt.close()
+
+        print(f"Saved: 05_anomaly_comparison.png")
+
+        # Recommendation
+        print("\n" + "="*70)
+        print("RECOMMENDATION")
+        print("="*70)
+
+        overlap_pct = both_count / (both_count + only_iso_count + only_lof_count) * 100 if (both_count + only_iso_count + only_lof_count) > 0 else 0
+
+        if overlap_pct > 50:
+            print(f"✓ High agreement ({overlap_pct:.1f}% overlap)")
+            print(f"  → Remove {both_count} anomalies detected by BOTH methods")
+            print(f"  → These are likely true anomalies")
+        else:
+            print(f"⚠ Low agreement ({overlap_pct:.1f}% overlap)")
+            print(f"  → Methods disagree on what is anomalous")
+            print(f"  → Option 1: Remove only {both_count} points detected by BOTH (conservative)")
+            print(f"  → Option 2: Remove all {both_count + only_iso_count + only_lof_count} flagged points (aggressive)")
+            print(f"  → Recommendation: Use conservative approach (only BOTH)")
+
+        return {
+            'both': both_count,
+            'only_iso': only_iso_count,
+            'only_lof': only_lof_count,
+            'normal': neither_count,
+            'both_indices': data_clean.index[both].tolist()
+        }
+
+    def run_analysis(self):
+        """Run complete analysis."""
         print(f"\n{'='*70}")
-        print(f"RUNNING COMPLETE ANALYSIS FOR: {self.dataset_name}")
+        print(f"RUNNING ANALYSIS: {self.dataset_name}")
         print(f"{'='*70}")
 
-        # Outlier detection
-        self.detect_outliers_iqr(threshold=1.5)
-        self.detect_outliers_zscore(threshold=3)
-
-        # Anomaly detection
-        self.detect_anomalies_isolation_forest(contamination=0.1)
-        self.detect_anomalies_lof(n_neighbors=20)
-
-        # Distribution analysis
-        self.analyze_distributions()
-
-        # Time series analysis
         self.plot_target_over_time()
-
-        # Correlation analysis
-        self.create_correlation_heatmap()
-
-        # Additional visualizations
-        self.create_additional_visualizations()
+        self.feature_importance_comparison()
+        iso_anomalies, iso_indices = self.detect_anomalies_isolation_forest()
+        lof_anomalies, lof_indices = self.detect_anomalies_lof()
+        comparison = self.compare_anomalies(iso_anomalies, lof_anomalies)
 
         print(f"\n{'='*70}")
-        print(f"ANALYSIS COMPLETE: {self.dataset_name}")
-        print(f"All visualizations saved to: {self.output_dir}")
+        print(f"COMPLETE: {self.dataset_name}")
+        print(f"Output: {self.output_dir}")
         print(f"{'='*70}\n")
+
+        return comparison
 
 
 def main():
-    """Main function to run analysis on both datasets."""
     from clean_data.clean_speed_trials import SPEED_TRIALS_REGULAR
     from clean_data.clean_weather_data import SPEED_TRIALS_WEATHER_CLEAN
 
     print("\n" + "="*70)
-    print("COMPREHENSIVE DATA ANALYSIS")
+    print("DATA ANALYSIS")
     print("="*70)
 
-    # Analyze speed_trials dataset
-    print("\n\n" + "#"*70)
-    print("# DATASET 1: SPEED TRIALS (REGULAR)")
-    print("#"*70)
     analyzer1 = DataAnalyzer(SPEED_TRIALS_REGULAR, 'speed_trials')
-    analyzer1.run_complete_analysis()
+    result1 = analyzer1.run_analysis()
 
-    # Analyze speed_trials_weather dataset
-    print("\n\n" + "#"*70)
-    print("# DATASET 2: SPEED TRIALS WITH WEATHER")
-    print("#"*70)
     analyzer2 = DataAnalyzer(SPEED_TRIALS_WEATHER_CLEAN, 'speed_trials_weather')
-    analyzer2.run_complete_analysis()
+    result2 = analyzer2.run_analysis()
 
     print("\n" + "="*70)
-    print("ALL ANALYSES COMPLETED SUCCESSFULLY")
-    print(f"Results saved to: {OUTPUT_DIR}")
+    print("DONE")
+    print(f"Results: {OUTPUT_DIR}")
     print("="*70)
 
 

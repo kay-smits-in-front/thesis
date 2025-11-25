@@ -1,13 +1,15 @@
 """"Physics-Informed Neural Network (PINN) for solving a simple ODE and measuring training speed."""
 import numpy as np
+import pandas as pd
 import tensorflow as tf
 from tensorflow import keras
+from tensorflow.keras.layers import LSTM, Dense, Dropout
 from tensorflow.keras.optimizers import Adam
 from sklearn.preprocessing import StandardScaler
 from sklearn.metrics import r2_score, mean_squared_error, mean_absolute_error
-from clean_data.clean_speed_trials import SPEED_TRIALS_REGULAR
+import load_data.speed_trials
+speed_trials = load_data.speed_trials.SPEED_TRIALS
 
-speed_trials = SPEED_TRIALS_REGULAR
 
 def compute_propeller_force_single_tf(u, v, r, nP, DP, k0, k1, k2, tP, wP0, xP_prime, L):
 	"""Compute propeller surge force - TensorFlow version."""
