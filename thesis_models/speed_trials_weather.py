@@ -7,8 +7,9 @@ from tensorflow.keras.layers import LSTM, Dense, Dropout
 from tensorflow.keras.optimizers import Adam
 from sklearn.preprocessing import StandardScaler
 from sklearn.metrics import r2_score, mean_squared_error, mean_absolute_error
-import load_data.speed_trials
-speed_trials = load_data.speed_trials.SPEED_TRIALS
+from clean_data.clean_weather_data import SPEED_TRIALS_WEATHER_CLEAN
+
+speed_trials = SPEED_TRIALS_WEATHER_CLEAN
 
 
 def compute_propeller_force_single_tf(u, v, r, nP, DP, k0, k1, k2, tP, wP0, xP_prime, L):
@@ -138,39 +139,8 @@ class PINNTrainer:
 
 		return history
 
-def prepare_data_with_unit_conversions(speed_trials, target_col='OPC_12_CPP_ENGINE_POWER'):
-	"""
-	Prepare data with unit conversions
-	"""
-	print("="*70)
-	print("PREPARING DATA WITH UNIT CONVERSIONS")
-	print("="*70)
 
-	data_converted = speed_trials.copy()
-
-	data_converted['u_ms'] = speed_trials['OPC_07_WATER_SPEED'] * 0.514444
-	data_converted['v_ms'] = 0.0
-	data_converted['r_rads'] = speed_trials['GPS_HDG_HEADING_ROT_S'] * 0.0174533
-	data_converted['nP_revs'] = speed_trials['OPC_40_PROP_RPM_FB'] / 60.0
-
-	print("\nConversions applied:")
-	print(f"✓ OPC_07_WATER_SPEED (kts) -> u_ms (m/s)")
-	print(f"✓ v_ms = 0.0 (m/s) - sway velocity not available")
-	print(f"✓ GPS_HDG_HEADING_ROT_S (deg/s) -> r_rads (rad/s)")
-	print(f"✓ OPC_40_PROP_RPM_FB (RPM) -> nP_revs (rev/s)")
-
-	print("\nConverted value ranges:")
-	print(f"u (m/s): min={data_converted['u_ms'].min():.2f}, max={data_converted['u_ms'].max():.2f}, mean={data_converted['u_ms'].mean():.2f}")
-	print(f"v (m/s): {data_converted['v_ms'].iloc[0]:.2f} (constant)")
-	print(f"r (rad/s): min={data_converted['r_rads'].min():.6f}, max={data_converted['r_rads'].max():.6f}, mean={data_converted['r_rads'].mean():.6f}")
-	print(f"nP (rev/s): min={data_converted['nP_revs'].min():.2f}, max={data_converted['nP_revs'].max():.2f}, mean={data_converted['nP_revs'].mean():.2f}")
-
-	print(f"\nTarget: {target_col}")
-	print(f"Power (kW): min={data_converted[target_col].min():.2f}, max={data_converted[target_col].max():.2f}, mean={data_converted[target_col].mean():.2f}")
-
-	return data_converted
-
-def train_models(data_converted, target_col, ship_params, timesteps=30):
+def train_models( target_col, ship_params, timesteps=30):
 	"""
 	Train LSTM PINN models with sequences
 	"""

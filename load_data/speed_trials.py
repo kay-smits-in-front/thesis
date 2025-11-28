@@ -5,7 +5,7 @@ DATA_PATH = r"/mnt/c/Users/KaySmitsInfront/PycharmProjects/thesis_KaySmits_Wärt
 
 def load_speed_trials(data_path):
     """Load and clean speed trials data from Excel file."""
-    speed_trials = pd.read_excel(data_path, header=None)
+    speed_trials = pd.read_excel(data_path, header=0)
     print("Speed trials data loaded with shape:", speed_trials.shape)
     return speed_trials
 

@@ -8,3 +8,5 @@ __pycache__/
 *.pyo
 
 /baseline_models/
+\analysis/output
+\model_performance

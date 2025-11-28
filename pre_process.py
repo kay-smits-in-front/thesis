@@ -1,0 +1,235 @@
+import numpy as np
+import pandas as pd
+import os
+import matplotlib.pyplot as plt
+from sklearn.linear_model import LinearRegression
+from sklearn.metrics import r2_score, mean_squared_error, mean_absolute_error
+from sklearn.preprocessing import StandardScaler
+from carbontracker.tracker import CarbonTracker
+
+os.makedirs('model_performance', exist_ok=True)
+
+
+def create_multivariate_lag_features(df, target_col, n_lags, forecast_horizon):
+	numeric_cols = df.select_dtypes(include=[np.number]).columns.tolist()
+
+	if target_col not in numeric_cols:
+		raise ValueError(f"{target_col} not found in numeric columns")
+
+	print(f"  Using {len(numeric_cols)} numeric columns")
+
+	X_list = []
+	y_list = []
+
+	for i in range(n_lags, len(df) - forecast_horizon):
+		features = []
+		for col in numeric_cols:
+			lag_values = df[col].iloc[i - n_lags:i].values
+			features.extend(lag_values)
+
+		target = df[target_col].iloc[i + forecast_horizon]
+
+		X_list.append(features)
+		y_list.append(target)
+
+	X = np.array(X_list)
+	y = np.array(y_list)
+
+	feature_names = []
+	for col in numeric_cols:
+		for lag in range(n_lags, 0, -1):
+			feature_names.append(f"{col}_lag{lag}")
+
+	return X, y, feature_names
+
+
+def split_data(X, y, train_ratio=0.6, val_ratio=0.2):
+	train_idx = int(len(X) * train_ratio)
+	val_idx = int(len(X) * (train_ratio + val_ratio))
+
+	X_train = X[:train_idx]
+	X_val = X[train_idx:val_idx]
+	X_test = X[val_idx:]
+
+	y_train = y[:train_idx]
+	y_val = y[train_idx:val_idx]
+	y_test = y[val_idx:]
+
+	return X_train, X_val, X_test, y_train, y_val, y_test
+
+
+def normalize_data(X_train, X_val, X_test):
+	scaler = StandardScaler()
+	scaler.fit(X_train)
+
+	X_train_scaled = scaler.transform(X_train)
+	X_val_scaled = scaler.transform(X_val)
+	X_test_scaled = scaler.transform(X_test)
+
+	return X_train_scaled, X_val_scaled, X_test_scaled
+
+
+def plot_actual_vs_predicted(y_true, y_pred, split_name, model_name):
+	plt.figure(figsize=(15, 5))
+	plt.plot(y_true[:1000], label='Actual', alpha=0.7)
+	plt.plot(y_pred[:1000], label='Predicted', alpha=0.7)
+	plt.xlabel('Time Step')
+	plt.ylabel('Engine Power')
+	plt.title(f'Actual vs Predicted - {split_name}')
+	plt.legend()
+	plt.grid(True)
+	plt.savefig(f'model_performance/{model_name}_{split_name}_actual_vs_predicted.png', dpi=300, bbox_inches='tight')
+	plt.close()
+
+
+def plot_prediction_errors(y_true, y_pred, split_name, model_name):
+	errors = y_true - y_pred
+
+	plt.figure(figsize=(15, 5))
+	plt.plot(errors[:1000])
+	plt.xlabel('Time Step')
+	plt.ylabel('Prediction Error')
+	plt.title(f'Prediction Errors - {split_name}')
+	plt.axhline(y=0, color='r', linestyle='--', alpha=0.5)
+	plt.grid(True)
+	plt.savefig(f'model_performance/{model_name}_{split_name}_prediction_errors.png', dpi=300, bbox_inches='tight')
+	plt.close()
+
+
+def plot_error_variance(y_true, y_pred, split_name, model_name):
+	errors = y_true - y_pred
+
+	plt.figure(figsize=(10, 5))
+	plt.hist(errors, bins=50, edgecolor='black', alpha=0.7)
+	plt.xlabel('Prediction Error')
+	plt.ylabel('Frequency')
+	plt.title(f'Error Distribution - {split_name}')
+	plt.axvline(x=0, color='r', linestyle='--', alpha=0.5)
+	plt.grid(True)
+	plt.savefig(f'model_performance/{model_name}_{split_name}_error_distribution.png', dpi=300, bbox_inches='tight')
+	plt.close()
+
+
+def plot_feature_importance(model, feature_names, model_name, top_n=20):
+	coefficients = model.coef_
+
+	feature_importance = pd.DataFrame({
+		'feature': feature_names,
+		'coefficient': coefficients
+	})
+
+	feature_importance['abs_coefficient'] = np.abs(feature_importance['coefficient'])
+	feature_importance = feature_importance.sort_values('abs_coefficient', ascending=False)
+
+	top_features = feature_importance.head(top_n)
+
+	plt.figure(figsize=(12, 8))
+	colors = ['green' if x > 0 else 'red' for x in top_features['coefficient']]
+	plt.barh(range(len(top_features)), top_features['coefficient'], color=colors)
+	plt.yticks(range(len(top_features)), top_features['feature'])
+	plt.xlabel('Coefficient Value')
+	plt.title(f'Top {top_n} Most Important Features')
+	plt.grid(True, axis='x')
+	plt.tight_layout()
+	plt.savefig(f'model_performance/{model_name}_feature_importance.png', dpi=300, bbox_inches='tight')
+	plt.close()
+
+
+def train_and_evaluate(dataset, dataset_name, n_lags=60):
+	target_col = "OPC_12_CPP_ENGINE_POWER"
+
+	print(f"\n{'='*60}")
+	print(f"Processing {dataset_name}")
+	print(f"{'='*60}")
+	print(f"Dataset shape: {dataset.shape}")
+
+	print(f"\nCreating lag features with n_lags={n_lags}...")
+
+	X, y, feature_names = create_multivariate_lag_features(dataset, target_col, n_lags=n_lags, forecast_horizon=60)
+
+	print(f"  Feature matrix shape: {X.shape}")
+	print(f"  Number of samples: {len(y)}")
+
+	X_train, X_val, X_test, y_train, y_val, y_test = split_data(X, y)
+
+	X_train_scaled, X_val_scaled, X_test_scaled = normalize_data(X_train, X_val, X_test)
+
+	model_name = f"MLR_multivariate_lags{n_lags}_{dataset_name.replace(' ', '_')}"
+
+	tracker = CarbonTracker(epochs=1)
+	tracker.epoch_start()
+
+	model = LinearRegression(n_jobs=-20)
+	model.fit(X_train_scaled, y_train)
+
+	tracker.epoch_end()
+
+	y_train_pred = model.predict(X_train_scaled)
+	r2_train = r2_score(y_train, y_train_pred)
+	mse_train = mean_squared_error(y_train, y_train_pred)
+	mae_train = mean_absolute_error(y_train, y_train_pred)
+
+	plot_actual_vs_predicted(y_train, y_train_pred, 'train', model_name)
+	plot_prediction_errors(y_train, y_train_pred, 'train', model_name)
+	plot_error_variance(y_train, y_train_pred, 'train', model_name)
+
+	tracker = CarbonTracker(epochs=1)
+	tracker.epoch_start()
+
+	y_val_pred = model.predict(X_val_scaled)
+	r2_val = r2_score(y_val, y_val_pred)
+	mse_val = mean_squared_error(y_val, y_val_pred)
+	mae_val = mean_absolute_error(y_val, y_val_pred)
+
+	plot_actual_vs_predicted(y_val, y_val_pred, 'val', model_name)
+	plot_prediction_errors(y_val, y_val_pred, 'val', model_name)
+	plot_error_variance(y_val, y_val_pred, 'val', model_name)
+
+	tracker.epoch_end()
+
+	tracker = CarbonTracker(epochs=1)
+	tracker.epoch_start()
+
+	y_test_pred = model.predict(X_test_scaled)
+	r2_test = r2_score(y_test, y_test_pred)
+	mse_test = mean_squared_error(y_test, y_test_pred)
+	mae_test = mean_absolute_error(y_test, y_test_pred)
+
+	plot_actual_vs_predicted(y_test, y_test_pred, 'test', model_name)
+	plot_prediction_errors(y_test, y_test_pred, 'test', model_name)
+	plot_error_variance(y_test, y_test_pred, 'test', model_name)
+
+	tracker.epoch_end()
+
+	plot_feature_importance(model, feature_names, model_name, top_n=20)
+
+	print(f"\nMultiple Linear Regression with n_lags={n_lags} - {dataset_name}:")
+	print(f"Train  - R²: {r2_train:.4f}, MSE: {mse_train:.4f}, MAE: {mae_train:.4f}")
+	print(f"Val    - R²: {r2_val:.4f}, MSE: {mse_val:.4f}, MAE: {mae_val:.4f}")
+	print(f"Test   - R²: {r2_test:.4f}, MSE: {mse_test:.4f}, MAE: {mae_test:.4f}")
+
+
+print("Loading preprocessed data...")
+OUTPUT_DIR = "output"
+
+regular_path = os.path.join(OUTPUT_DIR, "SPEED_TRIALS_REGULAR_FINAL.csv")
+weather_path = os.path.join(OUTPUT_DIR, "SPEED_TRIALS_WEATHER_FINAL.csv")
+
+if not os.path.exists(regular_path):
+	print(f"\nERROR: {regular_path} not found!")
+	print("Run pre_process.py first to create the preprocessed data.")
+	exit(1)
+
+if not os.path.exists(weather_path):
+	print(f"\nERROR: {weather_path} not found!")
+	print("Run pre_process.py first to create the preprocessed data.")
+	exit(1)
+
+speed_trials_regular = pd.read_csv(regular_path)
+speed_trials_weather = pd.read_csv(weather_path)
+
+print(f"Loaded SPEED_TRIALS_REGULAR_FINAL: {speed_trials_regular.shape}")
+print(f"Loaded SPEED_TRIALS_WEATHER_FINAL: {speed_trials_weather.shape}")
+
+train_and_evaluate(speed_trials_regular, "Regular", n_lags=60)
+train_and_evaluate(speed_trials_weather, "Weather", n_lags=60)
