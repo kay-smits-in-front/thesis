@@ -2,6 +2,7 @@ import numpy as np
 import pandas as pd
 import os
 import matplotlib.pyplot as plt
+from keras.src.layers import Dropout
 from sklearn.metrics import r2_score, mean_squared_error, mean_absolute_error
 from sklearn.preprocessing import StandardScaler
 import tensorflow as tf
@@ -50,12 +51,20 @@ def create_multivariate_lag_features(df, target_col, n_lags, forecast_horizon):
 
 
 def create_mlp_model(input_dim: int) -> keras.Model:
+	from tensorflow.keras import regularizers
+
+	# L2 regularization to prevent overfitting
+	l2_reg = 0.0001
+
 	model = keras.Sequential([
-		layers.Dense(64, activation='relu', input_dim=input_dim),
-		layers.Dense(32, activation='relu'),
+		layers.Dense(64, activation='relu',  # Reduced from 32
+		             kernel_regularizer=regularizers.l2(l2_reg)),
+		layers.Dense(32, activation='relu',  # Reduced from 32
+		             kernel_regularizer=regularizers.l2(l2_reg)),
 		layers.Dense(1)
 	])
-	model.compile(optimizer='adam', loss='mse')
+	optimizer = keras.optimizers.Adam(learning_rate=0.01)
+	model.compile(optimizer=optimizer, loss='mse')
 	return model
 
 
@@ -149,7 +158,7 @@ def train_and_evaluate(dataset, dataset_name: str, n_lags: int):
 
 	print(f"\nCreating multivariate lag features with n_lags={n_lags}...")
 
-	X, y = create_multivariate_lag_features(dataset, target_col, n_lags=n_lags, forecast_horizon=60)
+	X, y = create_multivariate_lag_features(dataset, target_col, n_lags=n_lags, forecast_horizon=10)
 
 	print(f"  Feature matrix shape: {X.shape}")
 	print(f"  Number of samples: {len(y)}")
@@ -160,10 +169,13 @@ def train_and_evaluate(dataset, dataset_name: str, n_lags: int):
 
 	model = create_mlp_model(input_dim=X_train_scaled.shape[1])
 
+
+
 	tracker = CarbonTracker(epochs=1)
 	tracker.epoch_start()
 
-	history = model.fit(X_train_scaled, y_train, epochs=3, batch_size=32, verbose=1, validation_data=(X_val_scaled, y_val))
+	history = model.fit(X_train_scaled, y_train, epochs=15, batch_size=32, verbose=1,
+	                    validation_data=(X_val_scaled, y_val))
 
 	tracker.epoch_end()
 
@@ -236,5 +248,5 @@ speed_trials_weather = pd.read_csv(weather_path)
 print(f"Loaded SPEED_TRIALS_REGULAR_FINAL: {speed_trials_regular.shape}")
 print(f"Loaded SPEED_TRIALS_WEATHER_FINAL: {speed_trials_weather.shape}")
 
-train_and_evaluate(speed_trials_regular, "Regular", n_lags=60)
-train_and_evaluate(speed_trials_weather, "Weather", n_lags=60)
+train_and_evaluate(speed_trials_regular, "Regular", n_lags=30)
+train_and_evaluate(speed_trials_weather, "Weather", n_lags=30)

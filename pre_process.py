@@ -1,235 +1,252 @@
+"""Data preprocessing: Add features, filter OPC_04/05, remove anomalies."""
+
+import os
 import numpy as np
 import pandas as pd
-import os
-import matplotlib.pyplot as plt
-from sklearn.linear_model import LinearRegression
-from sklearn.metrics import r2_score, mean_squared_error, mean_absolute_error
+from sklearn.ensemble import IsolationForest
 from sklearn.preprocessing import StandardScaler
-from carbontracker.tracker import CarbonTracker
+from sklearn.neighbors import LocalOutlierFactor
+import warnings
 
-os.makedirs('model_performance', exist_ok=True)
+warnings.filterwarnings('ignore')
 
-
-def create_multivariate_lag_features(df, target_col, n_lags, forecast_horizon):
-	numeric_cols = df.select_dtypes(include=[np.number]).columns.tolist()
-
-	if target_col not in numeric_cols:
-		raise ValueError(f"{target_col} not found in numeric columns")
-
-	print(f"  Using {len(numeric_cols)} numeric columns")
-
-	X_list = []
-	y_list = []
-
-	for i in range(n_lags, len(df) - forecast_horizon):
-		features = []
-		for col in numeric_cols:
-			lag_values = df[col].iloc[i - n_lags:i].values
-			features.extend(lag_values)
-
-		target = df[target_col].iloc[i + forecast_horizon]
-
-		X_list.append(features)
-		y_list.append(target)
-
-	X = np.array(X_list)
-	y = np.array(y_list)
-
-	feature_names = []
-	for col in numeric_cols:
-		for lag in range(n_lags, 0, -1):
-			feature_names.append(f"{col}_lag{lag}")
-
-	return X, y, feature_names
+OUTPUT_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "output")
+os.makedirs(OUTPUT_DIR, exist_ok=True)
 
 
-def split_data(X, y, train_ratio=0.6, val_ratio=0.2):
-	train_idx = int(len(X) * train_ratio)
-	val_idx = int(len(X) * (train_ratio + val_ratio))
+def add_engineered_features(data):
+	"""Add TRIM and DRAFT_AVG features."""
+	data = data.copy()
 
-	X_train = X[:train_idx]
-	X_val = X[train_idx:val_idx]
-	X_test = X[val_idx:]
+	# Find all DRAFT columns
+	draft_cols = [col for col in data.columns if 'DRAFT' in col.upper()]
+	print(f"  DRAFT columns found: {draft_cols}")
 
-	y_train = y[:train_idx]
-	y_val = y[train_idx:val_idx]
-	y_test = y[val_idx:]
+	# Add DRAFT_AVG
+	if len(draft_cols) > 0:
+		data['DRAFT_AVG'] = data[draft_cols].mean(axis=1)
+		print(f"  Added DRAFT_AVG column")
 
-	return X_train, X_val, X_test, y_train, y_val, y_test
+	# Add TRIM (Forward - Aft)
+	if 'OPC_14_VES_DRAFT_FWD' in data.columns and 'OPC_15_VES_DRAFT_AFT' in data.columns:
+		data['TRIM'] = data['OPC_14_VES_DRAFT_FWD'] - data['OPC_15_VES_DRAFT_AFT']
+		print(f"  Added TRIM column (FWD - AFT)")
+		print(f"    TRIM mean: {data['TRIM'].mean():.4f}")
+		print(f"    TRIM min: {data['TRIM'].min():.4f}")
+		print(f"    TRIM max: {data['TRIM'].max():.4f}")
+
+	return data
 
 
-def normalize_data(X_train, X_val, X_test):
+def apply_opc_filtering(data):
+	"""Apply OPC_4 and OPC_5 filtering."""
+	opc4_cols = [col for col in data.columns if col.startswith('OPC_04')]
+	opc5_cols = [col for col in data.columns if col.startswith('OPC_05')]
+
+	if not opc4_cols and not opc5_cols:
+		return data
+
+	print(f"\nStep 2: Applying OPC_4/5 filtering (values must be in [-3, 3])...")
+	original_rows = len(data)
+	mask = pd.Series(True, index=data.index)
+
+	for col in opc4_cols + opc5_cols:
+		col_mask = (data[col] >= -3) & (data[col] <= 3)
+		mask = mask & col_mask
+
+	data_filtered = data[mask].reset_index(drop=True)
+	removed = original_rows - len(data_filtered)
+	print(f"  Removed {removed} rows ({removed/original_rows*100:.2f}%)")
+
+	return data_filtered
+
+
+def remove_anomalies(data, target_col, contamination=0.05):
+	"""Remove overlapping anomalies detected by both IF and LOF."""
+	print(f"\nStep 3: Detecting anomalies...")
+
+	# Exclude columns
+	exclude_cols = ["OPC_41_PITCH_FB", "OPC_13_PROP_POWER", "PROP_SHAFT_POWER_KMT", "OPC_08_GROUND_SPEED",
+	                "elapsed_seconds", "hour", "minute", "second", "dataset_id",
+	                "GPS_GPGGA_Latitude", "GPS_GPGGA_Longitude", "GPS_GPGGA_UTC_time", "Date", "Time",
+	                "Unnamed: 23", "GPS_HDG_HEADING_ROT_S", "OPC_07_WATER_SPEED", "OPC_40_PROP_RPM_FB",
+	                target_col]
+
+	numeric_data = data.select_dtypes(include=[np.number])
+	feature_data = numeric_data.drop(columns=exclude_cols, errors='ignore')
+	data_clean = feature_data.dropna()
+
+	print(f"  Using {len(feature_data.columns)} features")
+	print(f"  Analyzing {len(data_clean)} rows")
+
+	# Scale data for anomaly detection
 	scaler = StandardScaler()
-	scaler.fit(X_train)
+	data_scaled = scaler.fit_transform(data_clean)
 
-	X_train_scaled = scaler.transform(X_train)
-	X_val_scaled = scaler.transform(X_val)
-	X_test_scaled = scaler.transform(X_test)
+	# Isolation Forest
+	iso_forest = IsolationForest(contamination=contamination, random_state=42, n_jobs=-1)
+	iso_predictions = iso_forest.fit_predict(data_scaled)
+	iso_anomalies = iso_predictions == -1
 
-	return X_train_scaled, X_val_scaled, X_test_scaled
+	# LOF
+	lof = LocalOutlierFactor(n_neighbors=20, contamination=contamination, n_jobs=-1)
+	lof_predictions = lof.fit_predict(data_scaled)
+	lof_anomalies = lof_predictions == -1
 
+	# Find overlap
+	both_anomalies = iso_anomalies & lof_anomalies
 
-def plot_actual_vs_predicted(y_true, y_pred, split_name, model_name):
-	plt.figure(figsize=(15, 5))
-	plt.plot(y_true[:1000], label='Actual', alpha=0.7)
-	plt.plot(y_pred[:1000], label='Predicted', alpha=0.7)
-	plt.xlabel('Time Step')
-	plt.ylabel('Engine Power')
-	plt.title(f'Actual vs Predicted - {split_name}')
-	plt.legend()
-	plt.grid(True)
-	plt.savefig(f'model_performance/{model_name}_{split_name}_actual_vs_predicted.png', dpi=300, bbox_inches='tight')
-	plt.close()
+	print(f"  Isolation Forest: {iso_anomalies.sum()} anomalies")
+	print(f"  LOF: {lof_anomalies.sum()} anomalies")
+	print(f"  Both methods: {both_anomalies.sum()} anomalies")
 
+	# Create mask for original data
+	anomaly_mask = pd.Series(False, index=data.index)
+	anomaly_mask.loc[data_clean.index[both_anomalies]] = True
 
-def plot_prediction_errors(y_true, y_pred, split_name, model_name):
-	errors = y_true - y_pred
+	# Remove anomalies
+	data_no_anomalies = data[~anomaly_mask].reset_index(drop=True)
+	print(f"  Removed {anomaly_mask.sum()} overlapping anomalies")
 
-	plt.figure(figsize=(15, 5))
-	plt.plot(errors[:1000])
-	plt.xlabel('Time Step')
-	plt.ylabel('Prediction Error')
-	plt.title(f'Prediction Errors - {split_name}')
-	plt.axhline(y=0, color='r', linestyle='--', alpha=0.5)
-	plt.grid(True)
-	plt.savefig(f'model_performance/{model_name}_{split_name}_prediction_errors.png', dpi=300, bbox_inches='tight')
-	plt.close()
+	return data_no_anomalies
 
 
-def plot_error_variance(y_true, y_pred, split_name, model_name):
-	errors = y_true - y_pred
+def main():
+	"""Prepare data for baseline models."""
+	from clean_data.clean_speed_trials import SPEED_TRIALS_REGULAR
+	from clean_data.clean_weather_data import SPEED_TRIALS_WEATHER_CLEAN
 
-	plt.figure(figsize=(10, 5))
-	plt.hist(errors, bins=50, edgecolor='black', alpha=0.7)
-	plt.xlabel('Prediction Error')
-	plt.ylabel('Frequency')
-	plt.title(f'Error Distribution - {split_name}')
-	plt.axvline(x=0, color='r', linestyle='--', alpha=0.5)
-	plt.grid(True)
-	plt.savefig(f'model_performance/{model_name}_{split_name}_error_distribution.png', dpi=300, bbox_inches='tight')
-	plt.close()
+	# Define target column
+	TARGET_COL = 'OPC_12_CPP_ENGINE_POWER'
+
+	print("\n" + "="*70)
+	print("DATA PREPROCESSING PIPELINE")
+	print("="*70)
+	print(f"Target column: {TARGET_COL}")
+
+	# ========================================================================
+	# PROCESS SPEED_TRIALS_REGULAR
+	# ========================================================================
+	print("\n" + "="*70)
+	print("PROCESSING: SPEED_TRIALS_REGULAR")
+	print("="*70)
+
+	print(f"\nOriginal data: {SPEED_TRIALS_REGULAR.shape}")
+
+	# Check if target exists
+	if TARGET_COL not in SPEED_TRIALS_REGULAR.columns:
+		print(f"\nERROR: Target column '{TARGET_COL}' not found in data!")
+		print(f"Available columns: {list(SPEED_TRIALS_REGULAR.columns)}")
+		return
+
+	# Step 1: Add engineered features BEFORE filtering
+	print("\nStep 1: Adding engineered features...")
+	data_st = add_engineered_features(SPEED_TRIALS_REGULAR)
+	print(f"  Shape after adding features: {data_st.shape}")
+
+	# Check for NaN values after adding features
+	nan_counts = data_st.isna().sum()
+	if nan_counts.sum() > 0:
+		print(f"  NaN values found in {(nan_counts > 0).sum()} columns")
+		print(f"  Total rows with any NaN: {data_st.isna().any(axis=1).sum()}")
+		print(f"  Dropping rows with NaN values...")
+		data_st = data_st.dropna().reset_index(drop=True)
+		print(f"  Shape after dropping NaN: {data_st.shape}")
+
+	# Step 2: Apply OPC filtering
+	data_st = apply_opc_filtering(data_st)
+	print(f"  Shape after OPC filtering: {data_st.shape}")
+
+	# Step 3: Remove anomalies
+	data_st_clean = remove_anomalies(data_st, TARGET_COL, contamination=0.05)
+	print(f"  Shape after removing anomalies: {data_st_clean.shape}")
+
+	# Step 4: Filter out low-power startup data
+	print(f"\nStep 4: Filtering operational data (power > 1000 kW)...")
+	power_threshold = 1000
+	operational_mask = data_st_clean[TARGET_COL] > power_threshold
+	removed_startup = (~operational_mask).sum()
+	print(f"  Removed {removed_startup} low-power rows ({removed_startup/len(data_st_clean)*100:.2f}%)")
+
+	data_st_clean = data_st_clean[operational_mask].reset_index(drop=True)
+	print(f"  Shape after power filtering: {data_st_clean.shape}")
+	print(f"  Final power range: {data_st_clean[TARGET_COL].min():.2f} - {data_st_clean[TARGET_COL].max():.2f} kW")
+
+	# Save FINAL cleaned data - THIS IS THE SINGLE SOURCE OF TRUTH
+	output_path_st = os.path.join(OUTPUT_DIR, "SPEED_TRIALS_REGULAR_FINAL.csv")
+	data_st_clean.to_csv(output_path_st, index=False)
+	print(f"\n✓ SAVED FINAL: {output_path_st}")
+
+	# ========================================================================
+	# PROCESS SPEED_TRIALS_WEATHER_CLEAN
+	# ========================================================================
+	print("\n" + "="*70)
+	print("PROCESSING: SPEED_TRIALS_WEATHER_CLEAN")
+	print("="*70)
+
+	print(f"\nOriginal data: {SPEED_TRIALS_WEATHER_CLEAN.shape}")
+
+	# Check if target exists
+	if TARGET_COL not in SPEED_TRIALS_WEATHER_CLEAN.columns:
+		print(f"\nERROR: Target column '{TARGET_COL}' not found in weather data!")
+		return
+
+	# Step 1: Add engineered features BEFORE filtering
+	print("\nStep 1: Adding engineered features...")
+	data_weather = add_engineered_features(SPEED_TRIALS_WEATHER_CLEAN)
+	print(f"  Shape after adding features: {data_weather.shape}")
+
+	# Check for NaN values after adding features
+	nan_counts = data_weather.isna().sum()
+	if nan_counts.sum() > 0:
+		print(f"  NaN values found in {(nan_counts > 0).sum()} columns")
+		print(f"  Total rows with any NaN: {data_weather.isna().any(axis=1).sum()}")
+		print(f"  Dropping rows with NaN values...")
+		data_weather = data_weather.dropna().reset_index(drop=True)
+		print(f"  Shape after dropping NaN: {data_weather.shape}")
+
+	# Step 2: Apply OPC filtering
+	data_weather = apply_opc_filtering(data_weather)
+	print(f"  Shape after OPC filtering: {data_weather.shape}")
+
+	# Step 3: Remove anomalies
+	data_weather_clean = remove_anomalies(data_weather, TARGET_COL, contamination=0.05)
+	print(f"  Shape after removing anomalies: {data_weather_clean.shape}")
+
+	# Step 4: Filter out low-power startup data
+	print(f"\nStep 4: Filtering operational data (power > 1000 kW)...")
+	power_threshold = 1000
+	operational_mask = data_weather_clean[TARGET_COL] > power_threshold
+	removed_startup = (~operational_mask).sum()
+	print(f"  Removed {removed_startup} low-power rows ({removed_startup/len(data_weather_clean)*100:.2f}%)")
+
+	data_weather_clean = data_weather_clean[operational_mask].reset_index(drop=True)
+	print(f"  Shape after power filtering: {data_weather_clean.shape}")
+	print(f"  Final power range: {data_weather_clean[TARGET_COL].min():.2f} - {data_weather_clean[TARGET_COL].max():.2f} kW")
+
+	# Save FINAL cleaned data - THIS IS THE SINGLE SOURCE OF TRUTH
+	output_path_weather = os.path.join(OUTPUT_DIR, "SPEED_TRIALS_WEATHER_FINAL.csv")
+	data_weather_clean.to_csv(output_path_weather, index=False)
+	print(f"\n✓ SAVED FINAL: {output_path_weather}")
+
+	# ========================================================================
+	# SUMMARY
+	# ========================================================================
+	print(f"\n{'='*70}")
+	print("PREPROCESSING COMPLETE")
+	print(f"{'='*70}")
+	print(f"\nFINAL datasets created (single source of truth for all models):")
+	print(f"  - SPEED_TRIALS_REGULAR_FINAL.csv ({len(data_st_clean)} rows, {len(data_st_clean.columns)} columns)")
+	print(f"  - SPEED_TRIALS_WEATHER_FINAL.csv ({len(data_weather_clean)} rows, {len(data_weather_clean.columns)} columns)")
+	print(f"\nPreprocessing pipeline:")
+	print(f"  1. Added TRIM and DRAFT_AVG features")
+	print(f"  2. Dropped rows with NaN values")
+	print(f"  3. Applied OPC_04/05 filtering (values in [-3, 3])")
+	print(f"  4. Removed anomalies (contamination=0.05)")
+	print(f"  5. Filtered operational data (engine power > 1000 kW)")
+	print(f"\nTo create visualizations, run: python3 create_visualizations.py")
+	print(f"\nAll models should now load from these FINAL files!")
 
 
-def plot_feature_importance(model, feature_names, model_name, top_n=20):
-	coefficients = model.coef_
-
-	feature_importance = pd.DataFrame({
-		'feature': feature_names,
-		'coefficient': coefficients
-	})
-
-	feature_importance['abs_coefficient'] = np.abs(feature_importance['coefficient'])
-	feature_importance = feature_importance.sort_values('abs_coefficient', ascending=False)
-
-	top_features = feature_importance.head(top_n)
-
-	plt.figure(figsize=(12, 8))
-	colors = ['green' if x > 0 else 'red' for x in top_features['coefficient']]
-	plt.barh(range(len(top_features)), top_features['coefficient'], color=colors)
-	plt.yticks(range(len(top_features)), top_features['feature'])
-	plt.xlabel('Coefficient Value')
-	plt.title(f'Top {top_n} Most Important Features')
-	plt.grid(True, axis='x')
-	plt.tight_layout()
-	plt.savefig(f'model_performance/{model_name}_feature_importance.png', dpi=300, bbox_inches='tight')
-	plt.close()
-
-
-def train_and_evaluate(dataset, dataset_name, n_lags=60):
-	target_col = "OPC_12_CPP_ENGINE_POWER"
-
-	print(f"\n{'='*60}")
-	print(f"Processing {dataset_name}")
-	print(f"{'='*60}")
-	print(f"Dataset shape: {dataset.shape}")
-
-	print(f"\nCreating lag features with n_lags={n_lags}...")
-
-	X, y, feature_names = create_multivariate_lag_features(dataset, target_col, n_lags=n_lags, forecast_horizon=60)
-
-	print(f"  Feature matrix shape: {X.shape}")
-	print(f"  Number of samples: {len(y)}")
-
-	X_train, X_val, X_test, y_train, y_val, y_test = split_data(X, y)
-
-	X_train_scaled, X_val_scaled, X_test_scaled = normalize_data(X_train, X_val, X_test)
-
-	model_name = f"MLR_multivariate_lags{n_lags}_{dataset_name.replace(' ', '_')}"
-
-	tracker = CarbonTracker(epochs=1)
-	tracker.epoch_start()
-
-	model = LinearRegression(n_jobs=-20)
-	model.fit(X_train_scaled, y_train)
-
-	tracker.epoch_end()
-
-	y_train_pred = model.predict(X_train_scaled)
-	r2_train = r2_score(y_train, y_train_pred)
-	mse_train = mean_squared_error(y_train, y_train_pred)
-	mae_train = mean_absolute_error(y_train, y_train_pred)
-
-	plot_actual_vs_predicted(y_train, y_train_pred, 'train', model_name)
-	plot_prediction_errors(y_train, y_train_pred, 'train', model_name)
-	plot_error_variance(y_train, y_train_pred, 'train', model_name)
-
-	tracker = CarbonTracker(epochs=1)
-	tracker.epoch_start()
-
-	y_val_pred = model.predict(X_val_scaled)
-	r2_val = r2_score(y_val, y_val_pred)
-	mse_val = mean_squared_error(y_val, y_val_pred)
-	mae_val = mean_absolute_error(y_val, y_val_pred)
-
-	plot_actual_vs_predicted(y_val, y_val_pred, 'val', model_name)
-	plot_prediction_errors(y_val, y_val_pred, 'val', model_name)
-	plot_error_variance(y_val, y_val_pred, 'val', model_name)
-
-	tracker.epoch_end()
-
-	tracker = CarbonTracker(epochs=1)
-	tracker.epoch_start()
-
-	y_test_pred = model.predict(X_test_scaled)
-	r2_test = r2_score(y_test, y_test_pred)
-	mse_test = mean_squared_error(y_test, y_test_pred)
-	mae_test = mean_absolute_error(y_test, y_test_pred)
-
-	plot_actual_vs_predicted(y_test, y_test_pred, 'test', model_name)
-	plot_prediction_errors(y_test, y_test_pred, 'test', model_name)
-	plot_error_variance(y_test, y_test_pred, 'test', model_name)
-
-	tracker.epoch_end()
-
-	plot_feature_importance(model, feature_names, model_name, top_n=20)
-
-	print(f"\nMultiple Linear Regression with n_lags={n_lags} - {dataset_name}:")
-	print(f"Train  - R²: {r2_train:.4f}, MSE: {mse_train:.4f}, MAE: {mae_train:.4f}")
-	print(f"Val    - R²: {r2_val:.4f}, MSE: {mse_val:.4f}, MAE: {mae_val:.4f}")
-	print(f"Test   - R²: {r2_test:.4f}, MSE: {mse_test:.4f}, MAE: {mae_test:.4f}")
-
-
-print("Loading preprocessed data...")
-OUTPUT_DIR = "output"
-
-regular_path = os.path.join(OUTPUT_DIR, "SPEED_TRIALS_REGULAR_FINAL.csv")
-weather_path = os.path.join(OUTPUT_DIR, "SPEED_TRIALS_WEATHER_FINAL.csv")
-
-if not os.path.exists(regular_path):
-	print(f"\nERROR: {regular_path} not found!")
-	print("Run pre_process.py first to create the preprocessed data.")
-	exit(1)
-
-if not os.path.exists(weather_path):
-	print(f"\nERROR: {weather_path} not found!")
-	print("Run pre_process.py first to create the preprocessed data.")
-	exit(1)
-
-speed_trials_regular = pd.read_csv(regular_path)
-speed_trials_weather = pd.read_csv(weather_path)
-
-print(f"Loaded SPEED_TRIALS_REGULAR_FINAL: {speed_trials_regular.shape}")
-print(f"Loaded SPEED_TRIALS_WEATHER_FINAL: {speed_trials_weather.shape}")
-
-train_and_evaluate(speed_trials_regular, "Regular", n_lags=60)
-train_and_evaluate(speed_trials_weather, "Weather", n_lags=60)
+if __name__ == "__main__":
+	main()

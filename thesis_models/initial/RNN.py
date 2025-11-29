@@ -1,0 +1,141 @@
+import numpy as np
+import pandas as pd
+import os
+import matplotlib.pyplot as plt
+import tensorflow as tf
+from tensorflow import keras
+from tensorflow.keras import layers
+from sklearn.metrics import r2_score, mean_squared_error, mean_absolute_error
+from sklearn.preprocessing import StandardScaler
+from carbontracker.tracker import CarbonTracker
+
+os.makedirs('model_performance', exist_ok=True)
+
+EXCLUDE_COLS = [
+	"OPC_12_CPP_ENGINE_POWER",
+	"OPC_41_PITCH_FB", "OPC_13_PROP_POWER", "PROP_SHAFT_POWER_KMT", "OPC_08_GROUND_SPEED",
+	"elapsed_seconds", "hour", "minute", "second", "dataset_id",
+	"GPS_GPGGA_Latitude", "GPS_GPGGA_Longitude", "GPS_GPGGA_UTC_time", "Date", "Time",
+	"OPC_17_VES_DRAFT_MID_SB", "OPC_14_VES_DRAFT_FWD", "OPC_16_VES_DRAFT_MID_PS", "OPC_15_VES_DRAFT_AFT"
+]
+
+
+def create_sequences(df, target_col, n_lags, forecast_horizon):
+	numeric_cols = df.select_dtypes(include=[np.number]).columns.tolist()
+	feature_cols = [col for col in numeric_cols if col not in EXCLUDE_COLS]
+
+	print(f"  Feature columns: {len(feature_cols)}")
+
+	X_list, y_list = [], []
+	for i in range(n_lags, len(df) - forecast_horizon):
+		X_list.append(df[feature_cols].iloc[i - n_lags:i].values)
+		y_list.append(df[target_col].iloc[i + forecast_horizon])
+
+	return np.array(X_list), np.array(y_list), feature_cols
+
+
+def split_data(X, y, train_ratio=0.6, val_ratio=0.2):
+	train_idx = int(len(X) * train_ratio)
+	val_idx = int(len(X) * (train_ratio + val_ratio))
+	return (X[:train_idx], X[train_idx:val_idx], X[val_idx:],
+	        y[:train_idx], y[train_idx:val_idx], y[val_idx:])
+
+
+def normalize_sequences(X_train, X_val, X_test):
+	scaler = StandardScaler()
+	X_train_reshaped = X_train.reshape(-1, X_train.shape[-1])
+	scaler.fit(X_train_reshaped)
+
+	X_train_scaled = scaler.transform(X_train.reshape(-1, X_train.shape[-1])).reshape(X_train.shape)
+	X_val_scaled = scaler.transform(X_val.reshape(-1, X_val.shape[-1])).reshape(X_val.shape)
+	X_test_scaled = scaler.transform(X_test.reshape(-1, X_test.shape[-1])).reshape(X_test.shape)
+
+	return X_train_scaled, X_val_scaled, X_test_scaled
+
+
+def create_rnn_model(input_shape):
+	model = keras.Sequential([
+		layers.SimpleRNN(64, return_sequences=True, input_shape=input_shape),
+		layers.Dropout(0.2),
+		layers.SimpleRNN(32, return_sequences=False),
+		layers.Dropout(0.2),
+		layers.Dense(1)
+	])
+	model.compile(optimizer='adam', loss='mse', metrics=['mae'])
+	return model
+
+
+def plot_actual_vs_predicted(y_true, y_pred, split_name, model_name):
+	plt.figure(figsize=(15, 5))
+	plt.plot(y_true[:1000], label='Actual', alpha=0.7)
+	plt.plot(y_pred[:1000], label='Predicted', alpha=0.7)
+	plt.xlabel('Time Step')
+	plt.ylabel('Engine Power')
+	plt.title(f'Actual vs Predicted - {split_name}')
+	plt.legend()
+	plt.grid(True)
+	plt.savefig(f'model_performance/{model_name}_{split_name}_actual_vs_predicted.png', dpi=300, bbox_inches='tight')
+	plt.close()
+
+
+def plot_training_loss(history, model_name):
+	plt.figure(figsize=(10, 5))
+	plt.plot(history.history['loss'], label='Train Loss')
+	plt.plot(history.history['val_loss'], label='Validation Loss')
+	plt.xlabel('Epoch')
+	plt.ylabel('Loss (MSE)')
+	plt.title('Training and Validation Loss')
+	plt.legend()
+	plt.grid(True)
+	plt.savefig(f'model_performance/{model_name}_training_loss.png', dpi=300, bbox_inches='tight')
+	plt.close()
+
+
+def train_and_evaluate(dataset, dataset_name, n_lags=60):
+	target_col = "OPC_12_CPP_ENGINE_POWER"
+
+	print(f"\n{'='*60}")
+	print(f"RNN - {dataset_name}")
+	print(f"{'='*60}")
+
+	X, y, feature_cols = create_sequences(dataset, target_col, n_lags, 10)
+	print(f"  Samples: {len(y)}, Sequence shape: {X.shape}")
+
+	X_train, X_val, X_test, y_train, y_val, y_test = split_data(X, y)
+	X_train_scaled, X_val_scaled, X_test_scaled = normalize_sequences(X_train, X_val, X_test)
+
+	tracker = CarbonTracker(epochs=1)
+	tracker.epoch_start()
+
+	model = create_rnn_model((X_train_scaled.shape[1], X_train_scaled.shape[2]))
+	history = model.fit(X_train_scaled, y_train, epochs=50, batch_size=32,
+	                    validation_data=(X_val_scaled, y_val), verbose=1)
+
+	tracker.epoch_end()
+
+	model_name = f"RNN_lags{n_lags}_{dataset_name}"
+	plot_training_loss(history, model_name)
+
+	for split_name, X_split, y_split in [('train', X_train_scaled, y_train),
+	                                     ('val', X_val_scaled, y_val),
+	                                     ('test', X_test_scaled, y_test)]:
+		y_pred = model.predict(X_split, verbose=1).flatten()
+		r2 = r2_score(y_split, y_pred)
+		mse = mean_squared_error(y_split, y_pred)
+		mae = mean_absolute_error(y_split, y_pred)
+		print(f"{split_name.capitalize():5s} - R²: {r2:.4f}, MSE: {mse:.4f}, MAE: {mae:.4f}")
+		plot_actual_vs_predicted(y_split, y_pred, split_name, model_name)
+
+
+OUTPUT_DIR = "output"
+regular_path = os.path.join(OUTPUT_DIR, "SPEED_TRIALS_REGULAR_FINAL.csv")
+weather_path = os.path.join(OUTPUT_DIR, "SPEED_TRIALS_WEATHER_FINAL.csv")
+
+if os.path.exists(regular_path) and os.path.exists(weather_path):
+	speed_trials_regular = pd.read_csv(regular_path)
+	speed_trials_weather = pd.read_csv(weather_path)
+
+	train_and_evaluate(speed_trials_regular, "Regular", n_lags=60)
+	train_and_evaluate(speed_trials_weather, "Weather", n_lags=60)
+else:
+	print("ERROR: Run pre_process.py first!")
