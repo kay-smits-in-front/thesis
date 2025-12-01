@@ -158,10 +158,10 @@ def train_models(data_converted, target_col, ship_params, timesteps=30):
 
 	X_columns = list(X.columns)
 	column_mapping_updated = {
-		'u': X_columns.index('u_ms'),
+		'u': X_columns.index('OPC_07_WATER_SPEED'),
 		'v': X_columns.index('v_ms'),
-		'r': X_columns.index('r_rads'),
-		'nP': X_columns.index('nP_revs')
+		'r': X_columns.index('GPS_HDG_HEADING_ROT_S'),
+		'nP': X_columns.index('OPC_40_PROP_RPM_FB')
 	}
 
 	scaler_X = StandardScaler()

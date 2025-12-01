@@ -59,6 +59,7 @@ def create_lstm_model(input_shape):
 		layers.Dropout(0.2),
 		layers.LSTM(32, return_sequences=False),
 		layers.Dropout(0.2),
+		layers.LSTM(16, return_sequences=False),
 		layers.Dense(1)
 	])
 	model.compile(optimizer='adam', loss='mse', metrics=['mae'])

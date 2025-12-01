@@ -109,8 +109,6 @@ def compute_propeller_force_single_tf(u, v, r, nP, DP, k0, k1, k2, tP, wP0, xP_p
 class LSTM_PINN(keras.Model):
 	def __init__(self, **kwargs):
 		super().__init__(**kwargs)
-		self.lstm1 = LSTM(64, return_sequences=True)
-		self.dropout1 = Dropout(0.2)
 		self.lstm2 = LSTM(32, return_sequences=True)
 		self.dropout2 = Dropout(0.2)
 		self.lstm3 = LSTM(16, return_sequences=False)
@@ -118,9 +116,7 @@ class LSTM_PINN(keras.Model):
 		self.output_layer = Dense(1)
 
 	def call(self, inputs):
-		x = self.lstm1(inputs)
-		x = self.dropout1(x)
-		x = self.lstm2(x)
+		x = self.lstm2(inputs)
 		x = self.dropout2(x)
 		x = self.lstm3(x)
 		x = self.dropout3(x)
@@ -128,39 +124,80 @@ class LSTM_PINN(keras.Model):
 
 
 class PINNTrainer:
-	def __init__(self, model, ship_params, column_mapping, physics_weight=0.0):
+	def __init__(self, model, ship_params, column_mapping, scaler_X, scaler_y, physics_weight=0.0):
 		self.model = model
 		self.ship_params = ship_params
 		self.column_mapping = column_mapping
 		self.physics_weight = physics_weight
-		self.optimizer = Adam(learning_rate=0.0001)
+		self.optimizer = Adam(learning_rate=0.001)
+
+		# Store scaler parameters
+		self.scaler_X_mean = tf.constant(scaler_X.mean_, dtype=tf.float32)
+		self.scaler_X_std = tf.constant(scaler_X.scale_, dtype=tf.float32)
+		self.scaler_y_mean = tf.constant(scaler_y.mean_[0], dtype=tf.float32)
+		self.scaler_y_std = tf.constant(scaler_y.scale_[0], dtype=tf.float32)
 
 	def compute_physics_loss(self, inputs, predictions):
 		if len(self.column_mapping) < 4:
 			return tf.constant(0.0)
 
 		try:
-			u = inputs[:, -1, self.column_mapping['u']]
-			v = inputs[:, -1, self.column_mapping['v']]
-			r = inputs[:, -1, self.column_mapping['r']]
-			nP = inputs[:, -1, self.column_mapping['nP']]
+			# Extract SCALED values
+			u_scaled = inputs[:, -1, self.column_mapping['u']]
+			v_scaled = inputs[:, -1, self.column_mapping['v']]
+			r_scaled = inputs[:, -1, self.column_mapping['r']]
+			nP_rpm_scaled = inputs[:, -1, self.column_mapping['nP']]
 
-			predicted_power_watts = predictions[:, 0] * 1000.0
+			# INVERSE TRANSFORM to real physical units
+			u = u_scaled * self.scaler_X_std[self.column_mapping['u']] + self.scaler_X_mean[self.column_mapping['u']]
+			v = v_scaled * self.scaler_X_std[self.column_mapping['v']] + self.scaler_X_mean[self.column_mapping['v']]
+			r = r_scaled * self.scaler_X_std[self.column_mapping['r']] + self.scaler_X_mean[self.column_mapping['r']]
+			nP_rpm = nP_rpm_scaled * self.scaler_X_std[self.column_mapping['nP']] + self.scaler_X_mean[self.column_mapping['nP']]
 
+			# Convert RPM to rev/s (Hz)
+			nP = nP_rpm / 60.0
+
+			# DEBUG - Print real physical values
+			if not hasattr(self, '_debug_printed'):
+				print(f"\nDEBUG Physics Loss (REAL units):")
+				print(f"  u (m/s): min={tf.reduce_min(u).numpy():.4f}, max={tf.reduce_max(u).numpy():.4f}, mean={tf.reduce_mean(u).numpy():.4f}")
+				print(f"  v (m/s): min={tf.reduce_min(v).numpy():.4f}, max={tf.reduce_max(v).numpy():.4f}, mean={tf.reduce_mean(v).numpy():.4f}")
+				print(f"  r (rad/s): min={tf.reduce_min(r).numpy():.6f}, max={tf.reduce_max(r).numpy():.6f}, mean={tf.reduce_mean(r).numpy():.6f}")
+				print(f"  nP_rpm (RPM): min={tf.reduce_min(nP_rpm).numpy():.4f}, max={tf.reduce_max(nP_rpm).numpy():.4f}, mean={tf.reduce_mean(nP_rpm).numpy():.4f}")
+				print(f"  nP (rev/s): min={tf.reduce_min(nP).numpy():.4f}, max={tf.reduce_max(nP).numpy():.4f}, mean={tf.reduce_mean(nP).numpy():.4f}")
+				self._debug_printed = True
+
+			# Inverse transform predictions to get real power (kW)
+			model_predicted_power_kW = predictions[:, 0] * self.scaler_y_std + self.scaler_y_mean
+
+			# Compute propeller thrust using physics equations
 			sp = self.ship_params
+			rho = 1025.0
+			beta = tf.math.atan2(-v, u)
+			r_prime = tf.where(tf.abs(u) > 1e-6, r * sp['L'] / u, 0.0)
+			betaP = beta - sp['xP_prime'] * r_prime
+			wP = sp['wP0'] * tf.exp(-4 * betaP**2)
+			uP = u * (1 - wP)
+
+			# Compute propeller thrust
 			XP = compute_propeller_force_single_tf(
 				u, v, r, nP,
 				sp['DP'], sp['k0'], sp['k1'], sp['k2'],
 				sp['tP'], sp['wP0'], sp['xP_prime'], sp['L']
 			)
 
-			predicted_thrust = predicted_power_watts / (tf.abs(u) + 1e-6)
-			physics_residual = tf.reduce_mean(tf.square((XP - predicted_thrust) / 1e6))
+			# Compute power from physics: Power = Force × Velocity
+			physics_predicted_power_watts = XP * uP
+			physics_predicted_power_kW = physics_predicted_power_watts / 1000.0
+
+			# Compare powers (both in kW), normalize by dividing by typical power scale
+			physics_residual = tf.reduce_mean(tf.square(
+				(physics_predicted_power_kW - model_predicted_power_kW) / 1000.0
+			))
 
 			return physics_residual
 		except:
 			return tf.constant(0.0)
-
 	@tf.function
 	def train_step(self, X_batch, y_batch):
 		with tf.GradientTape() as tape:
@@ -178,7 +215,7 @@ class PINNTrainer:
 		self.optimizer.apply_gradients(zip(gradients, self.model.trainable_variables))
 		return total_loss, data_loss, physics_loss
 
-	def fit(self, X_train, y_train, X_val, y_val, epochs=30, batch_size=64, patience=5):
+	def fit(self, X_train, y_train, X_val, y_val, epochs=20, batch_size=32, patience=5):
 		train_dataset = tf.data.Dataset.from_tensor_slices((X_train, y_train))
 		train_dataset = train_dataset.batch(batch_size)
 
@@ -206,8 +243,7 @@ class PINNTrainer:
 			history['physics_loss'].append(np.mean(epoch_physics_loss))
 			history['val_loss'].append(val_loss)
 
-			if (epoch + 1) % 10 == 0 or epoch == 0:
-				print(f"Epoch {epoch+1}/{epochs} - Loss: {history['loss'][-1]:.4f}, "
+			print(f"Epoch {epoch+1}/{epochs} - Loss: {history['loss'][-1]:.4f}, "
 				      f"Data Loss: {history['data_loss'][-1]:.4f}, "
 				      f"Physics Loss: {history['physics_loss'][-1]:.6f}, "
 				      f"Val Loss: {val_loss:.4f}")
@@ -248,16 +284,15 @@ def train_models(data, dataset_name, target_col, ship_params, timesteps=30):
 
 	print(f"Data shape after cleaning: X={X.shape}, y={y.shape}")
 
-	# Find physics columns
 	column_mapping = {}
 	for i, col in enumerate(feature_cols):
-		if 'v_ms' in col.lower() and 'u' not in col.lower():
+		if col == 'v_ms':
 			column_mapping['v'] = i
-		elif 'u_ms' in col.lower() or col == 'v_ms':
+		elif col == 'OPC_07_WATER_SPEED':
 			column_mapping['u'] = i
-		elif 'r_rad' in col.lower() or 'heading_rot' in col.lower():
+		elif col == 'GPS_HDG_HEADING_ROT_S':
 			column_mapping['r'] = i
-		elif 'np_rev' in col.lower() or 'prop_rpm' in col.lower():
+		elif col == 'OPC_40_PROP_RPM_FB':
 			column_mapping['nP'] = i
 
 	print(f"Physics column mapping: {column_mapping}")
@@ -310,7 +345,7 @@ def train_models(data, dataset_name, target_col, ship_params, timesteps=30):
 	results = []
 
 	# Train models with different physics weights
-	for pw in [0.0, 0.001, 0.01]:
+	for pw in [0.001, 0.01, 0.1]:
 		print("\n" + "="*70)
 		print(f"TRAINING WITH PHYSICS_WEIGHT = {pw}")
 		print("="*70)
@@ -319,9 +354,9 @@ def train_models(data, dataset_name, target_col, ship_params, timesteps=30):
 		tracker.epoch_start()
 
 		model = LSTM_PINN()
-		trainer = PINNTrainer(model, ship_params, column_mapping, physics_weight=pw)
+		trainer = PINNTrainer(model, ship_params, column_mapping, scaler_X, scaler_y, physics_weight=pw)
 		history = trainer.fit(X_train, y_train, X_validate, y_validate,
-		                      epochs=30, batch_size=64, patience=5)
+		                      epochs=20, batch_size=32)
 
 		tracker.epoch_end()
 

@@ -128,24 +128,39 @@ class RNN_PINN(keras.Model):
 
 
 class PINNTrainer:
-	def __init__(self, model, ship_params, column_mapping, physics_weight=0.0):
+	def __init__(self, model, ship_params, column_mapping, scaler_X, scaler_y, physics_weight=0.0):
 		self.model = model
 		self.ship_params = ship_params
 		self.column_mapping = column_mapping
 		self.physics_weight = physics_weight
 		self.optimizer = Adam(learning_rate=0.0001)
 
+		# Store scaler parameters
+		self.scaler_X_mean = tf.constant(scaler_X.mean_, dtype=tf.float32)
+		self.scaler_X_std = tf.constant(scaler_X.scale_, dtype=tf.float32)
+		self.scaler_y_mean = tf.constant(scaler_y.mean_[0], dtype=tf.float32)
+		self.scaler_y_std = tf.constant(scaler_y.scale_[0], dtype=tf.float32)
+
 	def compute_physics_loss(self, inputs, predictions):
 		if len(self.column_mapping) < 4:
 			return tf.constant(0.0)
 
 		try:
-			u = inputs[:, -1, self.column_mapping['u']]
-			v = inputs[:, -1, self.column_mapping['v']]
-			r = inputs[:, -1, self.column_mapping['r']]
-			nP = inputs[:, -1, self.column_mapping['nP']]
+			# Extract SCALED values
+			u_scaled = inputs[:, -1, self.column_mapping['u']]
+			v_scaled = inputs[:, -1, self.column_mapping['v']]
+			r_scaled = inputs[:, -1, self.column_mapping['r']]
+			nP_scaled = inputs[:, -1, self.column_mapping['nP']]
 
-			predicted_power_watts = predictions[:, 0] * 1000.0
+			# INVERSE TRANSFORM to real physical units
+			u = u_scaled * self.scaler_X_std[self.column_mapping['u']] + self.scaler_X_mean[self.column_mapping['u']]
+			v = v_scaled * self.scaler_X_std[self.column_mapping['v']] + self.scaler_X_mean[self.column_mapping['v']]
+			r = r_scaled * self.scaler_X_std[self.column_mapping['r']] + self.scaler_X_mean[self.column_mapping['r']]
+			nP = nP_scaled * self.scaler_X_std[self.column_mapping['nP']] + self.scaler_X_mean[self.column_mapping['nP']]
+
+			# Inverse transform predictions to get real power (kW)
+			predicted_power_kW = predictions[:, 0] * self.scaler_y_std + self.scaler_y_mean
+			predicted_power_watts = predicted_power_kW * 1000.0
 
 			sp = self.ship_params
 			XP = compute_propeller_force_single_tf(
@@ -158,7 +173,8 @@ class PINNTrainer:
 			physics_residual = tf.reduce_mean(tf.square((XP - predicted_thrust) / 1e6))
 
 			return physics_residual
-		except:
+		except Exception as e:
+			print(f"Physics loss error: {e}")
 			return tf.constant(0.0)
 
 	@tf.function
@@ -248,16 +264,15 @@ def train_models(data, dataset_name, target_col, ship_params, timesteps=30):
 
 	print(f"Data shape after cleaning: X={X.shape}, y={y.shape}")
 
-	# Find physics columns
 	column_mapping = {}
 	for i, col in enumerate(feature_cols):
-		if 'v_ms' in col.lower() and 'u' not in col.lower():
+		if col == 'v_ms':
 			column_mapping['v'] = i
-		elif 'u_ms' in col.lower() or col == 'v_ms':
+		elif col == 'OPC_07_WATER_SPEED':
 			column_mapping['u'] = i
-		elif 'r_rad' in col.lower() or 'heading_rot' in col.lower():
+		elif col == 'GPS_HDG_HEADING_ROT_S':
 			column_mapping['r'] = i
-		elif 'np_rev' in col.lower() or 'prop_rpm' in col.lower():
+		elif col == 'OPC_40_PROP_RPM_FB':
 			column_mapping['nP'] = i
 
 	print(f"Physics column mapping: {column_mapping}")
@@ -310,7 +325,7 @@ def train_models(data, dataset_name, target_col, ship_params, timesteps=30):
 	results = []
 
 	# Train models with different physics weights
-	for pw in [0.0, 0.01]:
+	for pw in [0.0, 0.001, 0.01]:
 		print("\n" + "="*70)
 		print(f"TRAINING WITH PHYSICS_WEIGHT = {pw}")
 		print("="*70)
@@ -319,9 +334,9 @@ def train_models(data, dataset_name, target_col, ship_params, timesteps=30):
 		tracker.epoch_start()
 
 		model = RNN_PINN()
-		trainer = PINNTrainer(model, ship_params, column_mapping, physics_weight=pw)
+		trainer = PINNTrainer(model, ship_params, column_mapping, scaler_X, scaler_y, physics_weight=pw)
 		history = trainer.fit(X_train, y_train, X_validate, y_validate,
-		                      epochs=30, batch_size=64, patience=5)
+		                      epochs=20, batch_size=32, patience=5)
 
 		tracker.epoch_end()
 

@@ -57,8 +57,6 @@ def create_mlp_model(input_dim: int) -> keras.Model:
 	l2_reg = 0.0001
 
 	model = keras.Sequential([
-		layers.Dense(64, activation='relu',  # Reduced from 32
-		             kernel_regularizer=regularizers.l2(l2_reg)),
 		layers.Dense(32, activation='relu',  # Reduced from 32
 		             kernel_regularizer=regularizers.l2(l2_reg)),
 		layers.Dense(1)
@@ -158,7 +156,7 @@ def train_and_evaluate(dataset, dataset_name: str, n_lags: int):
 
 	print(f"\nCreating multivariate lag features with n_lags={n_lags}...")
 
-	X, y = create_multivariate_lag_features(dataset, target_col, n_lags=n_lags, forecast_horizon=10)
+	X, y = create_multivariate_lag_features(dataset, target_col, n_lags=n_lags, forecast_horizon=15)
 
 	print(f"  Feature matrix shape: {X.shape}")
 	print(f"  Number of samples: {len(y)}")
@@ -174,7 +172,7 @@ def train_and_evaluate(dataset, dataset_name: str, n_lags: int):
 	tracker = CarbonTracker(epochs=1)
 	tracker.epoch_start()
 
-	history = model.fit(X_train_scaled, y_train, epochs=15, batch_size=32, verbose=1,
+	history = model.fit(X_train_scaled, y_train, epochs=60, batch_size=32, verbose=1,
 	                    validation_data=(X_val_scaled, y_val))
 
 	tracker.epoch_end()
