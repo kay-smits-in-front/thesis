@@ -198,7 +198,7 @@ def train_and_evaluate(dataset, dataset_name, n_lags=30):
 	y_val_scaled = scaler_y.transform(y_val.reshape(-1, 1)).flatten()
 
 	# Train models with different physics weights
-	for pw in [0.001, 0.01]:
+	for pw in [0.0]:
 		print(f"\n{'='*60}")
 		print(f"Training with physics_weight={pw}")
 		print(f"{'='*60}")

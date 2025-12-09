@@ -13,9 +13,10 @@ def run_module(module_name):
 
 def main():
 	modules = [
-		"thesis_models.physics.mlp_physics",
-		"thesis_models.physics.lstm_physics",
-		"thesis_models.physics.rnn_physics"
+		"thesis_models.physics.mlp",
+		"thesis_models.initial.MLR",
+		"thesis_models.physics.rnn",
+		"thesis_models.physics.lstm"
 	]
 
 	failed = []
