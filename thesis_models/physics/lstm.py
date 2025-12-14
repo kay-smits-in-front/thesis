@@ -28,11 +28,10 @@ CONFIG = {
 }
 
 EXCLUDE_COLS = [
-	"OPC_41_PITCH_FB", "OPC_13_PROP_POWER", "PROP_SHAFT_POWER_KMT", "OPC_08_GROUND_SPEED",
+	"OPC_13_PROP_POWER", "PROP_SHAFT_POWER_KMT", "OPC_08_GROUND_SPEED",
 	"elapsed_seconds", "hour", "minute", "second", "dataset_id",
 	"GPS_GPGGA_Latitude", "GPS_GPGGA_Longitude", "GPS_GPGGA_UTC_time", "Date", "Time",
 	"OPC_17_VES_DRAFT_MID_SB", "OPC_14_VES_DRAFT_FWD", "OPC_16_VES_DRAFT_MID_PS", "OPC_15_VES_DRAFT_AFT"
-]
 
 SHIP_PARAMS = {
 	'DP': 6.5, 'k0': 0.5453, 'k1': -0.4399, 'k2': -0.0379,
@@ -240,7 +239,6 @@ class PINNTrainer:
 		return history
 
 
-# Data preparation
 def prepare_data(data, target_col, timesteps):
 	all_exclude = EXCLUDE_COLS + [target_col]
 	numeric_cols = data.select_dtypes(include=[np.number]).columns.tolist()
@@ -293,6 +291,7 @@ def prepare_data(data, target_col, timesteps):
 		splits[key] = tf.convert_to_tensor(splits[key], dtype=tf.float32)
 
 	return splits, scaler_X, scaler_y, column_mapping
+# Data preparation
 
 
 def evaluate_model(model, X, y, scaler_y, split_name, model_name):
