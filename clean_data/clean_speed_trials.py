@@ -17,7 +17,6 @@ def clean_speed_trials():
 
     return speed_trials
 
-
 SPEED_TRIALS_REGULAR = clean_speed_trials()
 
 # Save to CSV for verification

@@ -31,7 +31,7 @@ EXCLUDE_COLS = [
 	"OPC_13_PROP_POWER", "PROP_SHAFT_POWER_KMT", "OPC_08_GROUND_SPEED",
 	"elapsed_seconds", "hour", "minute", "second", "dataset_id",
 	"GPS_GPGGA_Latitude", "GPS_GPGGA_Longitude", "GPS_GPGGA_UTC_time", "Date", "Time",
-	"OPC_17_VES_DRAFT_MID_SB", "OPC_14_VES_DRAFT_FWD", "OPC_16_VES_DRAFT_MID_PS", "OPC_15_VES_DRAFT_AFT"
+	"OPC_17_VES_DRAFT_MID_SB", "OPC_14_VES_DRAFT_FWD", "OPC_16_VES_DRAFT_MID_PS", "OPC_15_VES_DRAFT_AFT"]
 
 SHIP_PARAMS = {
 	'DP': 6.5, 'k0': 0.5453, 'k1': -0.4399, 'k2': -0.0379,
