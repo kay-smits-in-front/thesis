@@ -4,7 +4,7 @@
 
 This repository contains modules for cleaning data.
 This repository contains modules for feature analysis.
-this repository contains modules for creating visualisations
+this repository contains modules for visualisations
 This repository contains modules for lSTM, building, optimization, testing and perfomance review
 This repository contains modules for Physics informed neural networks, building, optimzation and reviewing.
 
