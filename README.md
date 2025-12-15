@@ -10,8 +10,5 @@ This repository contains modules for Physics informed neural networks, building,
 
 These modules have been implemented on two datasets. One without weather data named speed_trials. The other data set with weather data, called speed_trials_weather or additional_data.
 
-In this thesis research was done towards finding a combination of explanatory AI trough physics. This resulted in implementing and experimenting with Physics informed neural networks. These are part of discussion based on there use. If parameters are incorrect, or if you dont know parameters why would you implement this because it involves insecureties. if the data is still explaning for itself why would you add physics which makes it more complex. We researched if the physics rules are functioning better as a loss function or as a hybrid model. We compared these to the baseline perfomance models. Our target was to accurately predict future values.
-
-Optimization was done trough grid searching. Optimization was not the main focus of this thesis, moreover experimenting with the physics informed neural network. Optimization of the physics loss function was done trough....huppelepup.... search. To see value overtime. 
-
+In this thesis research was done towards finding a combination of explanatory AI trough embedding physics into the loss layer in deep learning models. In this case MLP, RNN and LSTM
 
