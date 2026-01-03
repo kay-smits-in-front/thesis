@@ -18,8 +18,8 @@ CONFIG = {
 	'epochs': 20,
 	'batch_size': 32,
 	'patience': 5,
-	'learning_rate': 0.0001,
-	'physics_weights': [0.0, 0.001, 0.01, 0.1],
+	'learning_rate': 0.001,
+	'physics_weights': [0.0],
 	'rnn_config': {
 		'layer1_units': 64,
 		'layer2_units': 32,
@@ -29,7 +29,8 @@ CONFIG = {
 }
 
 EXCLUDE_COLS = [
-	"OPC_41_PITCH_FB", "OPC_13_PROP_POWER", "PROP_SHAFT_POWER_KMT", "OPC_08_GROUND_SPEED",
+    "OPC_12_CPP_ENGINE_POWER",  # Target
+	"OPC_13_PROP_POWER", "PROP_SHAFT_POWER_KMT", "OPC_08_GROUND_SPEED",
 	"elapsed_seconds", "hour", "minute", "second", "dataset_id",
 	"GPS_GPGGA_Latitude", "GPS_GPGGA_Longitude", "GPS_GPGGA_UTC_time", "Date", "Time",
 	"OPC_17_VES_DRAFT_MID_SB", "OPC_14_VES_DRAFT_FWD", "OPC_16_VES_DRAFT_MID_PS", "OPC_15_VES_DRAFT_AFT"
