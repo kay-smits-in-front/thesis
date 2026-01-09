@@ -1,29 +1,50 @@
+"""
+MLP with Physics-Informed Neural Networks
+Best configuration: Triple [128, 64, 32], Batch 16, Physics 0.01
+Uses non-overlapping lag features with batch-based splitting
+"""
+
 import numpy as np
 import pandas as pd
 import os
 import matplotlib.pyplot as plt
 import tensorflow as tf
 from tensorflow import keras
-from tensorflow.keras import layers, regularizers
-from sklearn.metrics import r2_score, mean_squared_error, mean_absolute_error
+from tensorflow.keras.layers import Dense, Dropout
+from tensorflow.keras.optimizers import Adam
 from sklearn.preprocessing import StandardScaler
+from sklearn.metrics import r2_score, mean_squared_error, mean_absolute_error
 from carbontracker.tracker import CarbonTracker
+from datetime import datetime
+import json
 
-os.makedirs('model_performance', exist_ok=True)
-
-# Ship parameters for physics loss
-SHIP_PARAMS = {
-	'DP': 6.5, 'k0': 0.5453, 'k1': -0.4399, 'k2': -0.0379,
-	'tP': 0.1, 'wP0': 0.16, 'xP_prime': -0.5, 'L': 214.0
+# Configuration - Best performing model
+CONFIG = {
+	'output_dir': 'model_performance',
+	'architecture': [128, 64, 32],
+	'batch_size': 16,
+	'physics_weights': [0.0, 0.01],  # Compare baseline vs best physics
+	'n_lags': 15,
+	'epochs': 20,
+	'patience': 7,
+	'learning_rate': 0.001,
+	'dropout_rate': 0.2
 }
 
 EXCLUDE_COLS = [
-	"OPC_12_CPP_ENGINE_POWER",  # Target
+	"OPC_12_CPP_ENGINE_POWER",
 	"OPC_13_PROP_POWER", "PROP_SHAFT_POWER_KMT", "OPC_08_GROUND_SPEED",
 	"elapsed_seconds", "hour", "minute", "second", "dataset_id",
 	"GPS_GPGGA_Latitude", "GPS_GPGGA_Longitude", "GPS_GPGGA_UTC_time", "Date", "Time",
 	"OPC_17_VES_DRAFT_MID_SB", "OPC_14_VES_DRAFT_FWD", "OPC_16_VES_DRAFT_MID_PS", "OPC_15_VES_DRAFT_AFT"
 ]
+
+SHIP_PARAMS = {
+	'DP': 6.5, 'k0': 0.5453, 'k1': -0.4399, 'k2': -0.0379,
+	'tP': 0.1, 'wP0': 0.16, 'xP_prime': -0.5, 'L': 214.0
+}
+
+os.makedirs(CONFIG['output_dir'], exist_ok=True)
 
 
 def compute_propeller_force_tf(u, v, r, nP):
@@ -41,41 +62,30 @@ def compute_propeller_force_tf(u, v, r, nP):
 	return XP
 
 
-def create_multivariate_lag_features(df, target_col, n_lags, forecast_horizon):
+def create_multivariate_lag_features(df, target_col, n_lags):
 	numeric_cols = df.select_dtypes(include=[np.number]).columns.tolist()
 	feature_cols = [col for col in numeric_cols if col not in EXCLUDE_COLS]
 
-	print(f"  Feature columns: {len(feature_cols)}")
-
 	X_list, y_list = [], []
-	for i in range(n_lags, len(df) - forecast_horizon):
+	for i in range(n_lags, len(df)):
 		features = []
 		for col in feature_cols:
 			features.extend(df[col].iloc[i - n_lags:i].values)
 		X_list.append(features)
-		y_list.append(df[target_col].iloc[i + forecast_horizon])
+		y_list.append(df[target_col].iloc[i])
 
 	return np.array(X_list), np.array(y_list), feature_cols
 
 
-def split_data(X, y, train_ratio=0.6, val_ratio=0.2):
-	train_idx = int(len(X) * train_ratio)
-	val_idx = int(len(X) * (train_ratio + val_ratio))
-	return (X[:train_idx], X[train_idx:val_idx], X[val_idx:],
-	        y[:train_idx], y[train_idx:val_idx], y[val_idx:])
-
-
 class MLPWithPhysics(keras.Model):
-	def __init__(self, input_dim, n_lags, feature_cols, scaler_X, scaler_y, physics_weight=0.01):
+	def __init__(self, input_dim, n_lags, feature_cols, scaler_X, scaler_y, physics_weight, architecture):
 		super().__init__()
 		self.physics_weight = physics_weight
 		self.n_lags = n_lags
 		self.n_features = len(feature_cols)
+		self.architecture = architecture
 
-		# FIXED: Initialize column_mapping BEFORE using it
 		self.column_mapping = {}
-
-		# Map to the LAST timestep in the lagged features
 		for i, col in enumerate(feature_cols):
 			if col == 'v_ms':
 				self.column_mapping['v'] = (n_lags - 1) * len(feature_cols) + i
@@ -86,211 +96,321 @@ class MLPWithPhysics(keras.Model):
 			elif col == 'OPC_40_PROP_RPM_FB':
 				self.column_mapping['nP'] = (n_lags - 1) * len(feature_cols) + i
 
-		print(f"Column mapping for physics: {self.column_mapping}")
-
-		# Store scaler parameters
 		self.scaler_X_mean = tf.constant(scaler_X.mean_, dtype=tf.float32)
 		self.scaler_X_std = tf.constant(scaler_X.scale_, dtype=tf.float32)
 		self.scaler_y_mean = tf.constant(scaler_y.mean_[0], dtype=tf.float32)
 		self.scaler_y_std = tf.constant(scaler_y.scale_[0], dtype=tf.float32)
 
-		self.dense1 = layers.Dense(32, activation='relu', kernel_regularizer=regularizers.l2(0.01))
-		self.dense2 = layers.Dense(16, activation='relu', kernel_regularizer=regularizers.l2(0.01))
-		self.dropout = layers.Dropout(0.2)
-		self.output_layer = layers.Dense(1)
+		self.dense_layers = []
+		for i, units in enumerate(architecture):
+			self.dense_layers.append(Dense(units, activation='relu'))
+			if i < len(architecture) - 1:
+				self.dense_layers.append(Dropout(CONFIG['dropout_rate']))
+
+		self.output_layer = Dense(1)
 
 	def call(self, inputs):
-		x = self.dense1(inputs)
-		x = self.dense2(x)
-		x = self.dropout(x)
+		x = inputs
+		for layer in self.dense_layers:
+			x = layer(x)
 		return self.output_layer(x)
 
 	def compute_physics_loss(self, inputs, predictions):
-		if len(self.column_mapping) < 4:
-			return tf.constant(0.0)
+		u_scaled = inputs[:, self.column_mapping['u']]
+		v_scaled = inputs[:, self.column_mapping['v']] if 'v' in self.column_mapping else tf.zeros_like(inputs[:, 0])
+		r_scaled = inputs[:, self.column_mapping['r']]
+		nP_scaled = inputs[:, self.column_mapping['nP']]
 
-		try:
-			# FIXED: Input is already flattened, no need to reshape
-			# Extract SCALED values directly from flattened input
-			u_scaled = inputs[:, self.column_mapping['u']]
-			v_scaled = inputs[:, self.column_mapping['v']] if 'v' in self.column_mapping else tf.zeros_like(inputs[:, 0])
-			r_scaled = inputs[:, self.column_mapping['r']]
-			nP_scaled = inputs[:, self.column_mapping['nP']]
+		u = u_scaled * self.scaler_X_std[self.column_mapping['u']] + self.scaler_X_mean[self.column_mapping['u']]
+		v = v_scaled * self.scaler_X_std[self.column_mapping['v']] + self.scaler_X_mean[self.column_mapping['v']] if 'v' in self.column_mapping else v_scaled
+		r = r_scaled * self.scaler_X_std[self.column_mapping['r']] + self.scaler_X_mean[self.column_mapping['r']]
+		nP = nP_scaled * self.scaler_X_std[self.column_mapping['nP']] + self.scaler_X_mean[self.column_mapping['nP']]
 
-			# INVERSE TRANSFORM to real physical units
-			u = u_scaled * self.scaler_X_std[self.column_mapping['u']] + self.scaler_X_mean[self.column_mapping['u']]
-			v = v_scaled * self.scaler_X_std[self.column_mapping['v']] + self.scaler_X_mean[self.column_mapping['v']] if 'v' in self.column_mapping else v_scaled
-			r = r_scaled * self.scaler_X_std[self.column_mapping['r']] + self.scaler_X_mean[self.column_mapping['r']]
-			nP = nP_scaled * self.scaler_X_std[self.column_mapping['nP']] + self.scaler_X_mean[self.column_mapping['nP']]
+		predicted_power_kW = predictions[:, 0] * self.scaler_y_std + self.scaler_y_mean
+		predicted_power_watts = predicted_power_kW * 1000.0
 
-			# Inverse transform predictions to get real power (kW)
-			predicted_power_kW = predictions[:, 0] * self.scaler_y_std + self.scaler_y_mean
-			predicted_power_watts = predicted_power_kW * 1000.0
+		XP = compute_propeller_force_tf(u, v, r, nP)
+		predicted_thrust = predicted_power_watts / (tf.abs(u) + 1e-6)
+		physics_residual = tf.reduce_mean(tf.square((XP - predicted_thrust) / 1e6))
 
-			XP = compute_propeller_force_tf(u, v, r, nP)
+		return physics_residual
 
-			predicted_thrust = predicted_power_watts / (tf.abs(u) + 1e-6)
-			physics_residual = tf.reduce_mean(tf.square((XP - predicted_thrust) / 1e6))
-
-			return physics_residual
-		except Exception as e:
-			print(f"Physics loss error: {e}")
-			return tf.constant(0.0)
-
+	@tf.function
 	def train_step(self, data):
 		x, y = data
 		with tf.GradientTape() as tape:
 			y_pred = self(x, training=True)
-			data_loss = self.compiled_loss(y, y_pred)
+			data_loss = tf.reduce_mean(tf.square(y - y_pred))
 
 			if self.physics_weight > 0:
 				physics_loss = self.compute_physics_loss(x, y_pred)
 				total_loss = data_loss + self.physics_weight * physics_loss
 			else:
-				physics_loss = tf.constant(0.0)  # CHANGED: Use tf.constant instead of 0.0
+				physics_loss = tf.constant(0.0)
 				total_loss = data_loss
 
 		gradients = tape.gradient(total_loss, self.trainable_variables)
 		self.optimizer.apply_gradients(zip(gradients, self.trainable_variables))
-		self.compiled_metrics.update_state(y, y_pred)
 
-		# IMPORTANT: Must return a dict with metric results
-		results = {m.name: m.result() for m in self.metrics}
-		results['loss'] = total_loss  # Add total loss to results
-		return results
+		return total_loss, data_loss, physics_loss
+
+
+def plot_training_loss(history, model_name):
+	plt.figure(figsize=(12, 5))
+	plt.subplot(1, 2, 1)
+	plt.plot(history['loss'], label='Train Loss')
+	plt.plot(history['val_loss'], label='Val Loss')
+	plt.xlabel('Epoch')
+	plt.ylabel('Total Loss')
+	plt.title('Training and Validation Loss')
+	plt.legend()
+	plt.grid(True)
+
+	plt.subplot(1, 2, 2)
+	plt.plot(history['data_loss'], label='Data Loss')
+	plt.plot(history['physics_loss'], label='Physics Loss')
+	plt.xlabel('Epoch')
+	plt.ylabel('Loss Component')
+	plt.title('Loss Components')
+	plt.legend()
+	plt.grid(True)
+	plt.yscale('log')
+
+	plt.tight_layout()
+	plt.savefig(f"{CONFIG['output_dir']}/{model_name}_training_loss.png", dpi=300, bbox_inches='tight')
+	plt.close()
+
 
 def plot_actual_vs_predicted(y_true, y_pred, split_name, model_name):
 	plt.figure(figsize=(15, 5))
 	plt.plot(y_true[:1000], label='Actual', alpha=0.7)
 	plt.plot(y_pred[:1000], label='Predicted', alpha=0.7)
 	plt.xlabel('Time Step')
-	plt.ylabel('Engine Power')
+	plt.ylabel('Engine Power (kW)')
 	plt.title(f'Actual vs Predicted - {split_name}')
 	plt.legend()
 	plt.grid(True)
-	plt.savefig(f'model_performance/{model_name}_{split_name}_actual_vs_predicted.png', dpi=300, bbox_inches='tight')
+	plt.savefig(f"{CONFIG['output_dir']}/{model_name}_{split_name}_actual_vs_predicted.png", dpi=300, bbox_inches='tight')
 	plt.close()
 
 
-def train_and_evaluate(dataset, dataset_name, n_lags=30):
-	target_col = "OPC_12_CPP_ENGINE_POWER"
+def plot_prediction_errors(y_true, y_pred, split_name, model_name):
+	errors = y_true - y_pred
+	plt.figure(figsize=(15, 5))
+	plt.plot(errors[:1000])
+	plt.xlabel('Time Step')
+	plt.ylabel('Prediction Error (kW)')
+	plt.title(f'Prediction Errors - {split_name}')
+	plt.axhline(y=0, color='r', linestyle='--', alpha=0.5)
+	plt.grid(True)
+	plt.savefig(f"{CONFIG['output_dir']}/{model_name}_{split_name}_prediction_errors.png", dpi=300, bbox_inches='tight')
+	plt.close()
 
-	print(f"\n{'='*60}")
-	print(f"MLP with Physics Loss - {dataset_name}")
-	print(f"{'='*60}")
 
-	X, y, feature_cols = create_multivariate_lag_features(dataset, target_col, n_lags, 10)
-	print(f"  Samples: {len(y)}, Features: {X.shape[1]}")
+def plot_error_variance(y_true, y_pred, split_name, model_name):
+	errors = y_true - y_pred
+	plt.figure(figsize=(10, 5))
+	plt.hist(errors, bins=50, edgecolor='black', alpha=0.7)
+	plt.xlabel('Prediction Error (kW)')
+	plt.ylabel('Frequency')
+	plt.title(f'Error Distribution - {split_name}')
+	plt.axvline(x=0, color='r', linestyle='--', alpha=0.5)
+	plt.grid(True)
+	plt.savefig(f"{CONFIG['output_dir']}/{model_name}_{split_name}_error_distribution.png", dpi=300, bbox_inches='tight')
+	plt.close()
 
-	X_train, X_val, X_test, y_train, y_val, y_test = split_data(X, y)
 
-	# Create scalers
+def train_with_tracking(model, X_train, y_train, X_val, y_val, epochs, batch_size, patience):
+	train_dataset = tf.data.Dataset.from_tensor_slices((X_train, y_train)).batch(batch_size)
+	history = {'loss': [], 'data_loss': [], 'physics_loss': [], 'val_loss': [],
+	           'val_data_loss': [], 'val_physics_loss': []}
+
+	best_val_loss = float('inf')
+	patience_counter = 0
+
+	for epoch in range(epochs):
+		epoch_loss, epoch_data_loss, epoch_physics_loss = [], [], []
+
+		for X_batch, y_batch in train_dataset:
+			total_loss, data_loss, physics_loss = model.train_step((X_batch, y_batch))
+			epoch_loss.append(float(total_loss.numpy()))
+			epoch_data_loss.append(float(data_loss.numpy()))
+			epoch_physics_loss.append(float(physics_loss.numpy()))
+
+		val_pred = model(X_val, training=False)
+		val_data_loss = tf.reduce_mean(tf.square(y_val - val_pred))
+		if model.physics_weight > 0:
+			val_physics_loss = model.compute_physics_loss(X_val, val_pred)
+		else:
+			val_physics_loss = tf.constant(0.0)
+		val_total_loss = val_data_loss + model.physics_weight * val_physics_loss
+
+		history['loss'].append(np.mean(epoch_loss))
+		history['data_loss'].append(np.mean(epoch_data_loss))
+		history['physics_loss'].append(np.mean(epoch_physics_loss))
+		history['val_loss'].append(float(val_total_loss.numpy()))
+		history['val_data_loss'].append(float(val_data_loss.numpy()))
+		history['val_physics_loss'].append(float(val_physics_loss.numpy()))
+
+		if val_total_loss < best_val_loss:
+			best_val_loss = val_total_loss
+			patience_counter = 0
+		else:
+			patience_counter += 1
+
+		if patience_counter >= patience:
+			print(f"Early stopping at epoch {epoch+1}")
+			break
+
+	return history
+
+
+def evaluate_model(model, X, y, scaler_y, split_name, model_name):
+	y_pred_scaled = model.predict(X, verbose=0)
+	y_pred = scaler_y.inverse_transform(y_pred_scaled)
+	y_true = scaler_y.inverse_transform(y.numpy().reshape(-1, 1))
+
+	metrics = {
+		'r2': float(r2_score(y_true, y_pred)),
+		'mse': float(mean_squared_error(y_true, y_pred)),
+		'mae': float(mean_absolute_error(y_true, y_pred))
+	}
+
+	plot_actual_vs_predicted(y_true.flatten(), y_pred.flatten(), split_name, model_name)
+	plot_prediction_errors(y_true.flatten(), y_pred.flatten(), split_name, model_name)
+	plot_error_variance(y_true.flatten(), y_pred.flatten(), split_name, model_name)
+
+	return metrics
+
+
+def prepare_data(df, target_col, n_lags, batch_size):
+	# CRITICAL: Create lag features first, then split BEFORE scaling
+	X, y, feature_cols = create_multivariate_lag_features(df, target_col, n_lags)
+	print(f"Samples: {len(y)}, Features: {X.shape[1]}")
+
+	# Split BEFORE scaling to prevent data leakage
+	train_size = int(len(X) * 0.6)
+	val_size = int(len(X) * 0.2)
+
+	X_train_raw = X[:train_size]
+	y_train_raw = y[:train_size]
+	X_val_raw = X[train_size:train_size+val_size]
+	y_val_raw = y[train_size:train_size+val_size]
+	X_test_raw = X[train_size+val_size:]
+	y_test_raw = y[train_size+val_size:]
+
+	# Fit scaler ONLY on train data
 	scaler_X = StandardScaler()
 	scaler_y = StandardScaler()
+	scaler_X.fit(X_train_raw)
+	scaler_y.fit(y_train_raw.reshape(-1, 1))
 
-	scaler_X.fit(X_train)
-	X_train_scaled = scaler_X.transform(X_train)
-	X_val_scaled = scaler_X.transform(X_val)
-	X_test_scaled = scaler_X.transform(X_test)
+	# Transform each split separately
+	X_train_scaled = scaler_X.transform(X_train_raw)
+	y_train_scaled = scaler_y.transform(y_train_raw.reshape(-1, 1)).flatten()
+	X_val_scaled = scaler_X.transform(X_val_raw)
+	y_val_scaled = scaler_y.transform(y_val_raw.reshape(-1, 1)).flatten()
+	X_test_scaled = scaler_X.transform(X_test_raw)
+	y_test_scaled = scaler_y.transform(y_test_raw.reshape(-1, 1)).flatten()
 
-	scaler_y.fit(y_train.reshape(-1, 1))
-	y_train_scaled = scaler_y.transform(y_train.reshape(-1, 1)).flatten()
-	y_val_scaled = scaler_y.transform(y_val.reshape(-1, 1)).flatten()
+	splits = {
+		'X_train': tf.convert_to_tensor(X_train_scaled, dtype=tf.float32),
+		'y_train': tf.convert_to_tensor(y_train_scaled, dtype=tf.float32),
+		'X_val': tf.convert_to_tensor(X_val_scaled, dtype=tf.float32),
+		'y_val': tf.convert_to_tensor(y_val_scaled, dtype=tf.float32),
+		'X_test': tf.convert_to_tensor(X_test_scaled, dtype=tf.float32),
+		'y_test': tf.convert_to_tensor(y_test_scaled, dtype=tf.float32)
+	}
 
-	# Train models with different physics weights
-	for pw in [0.0]:
-		print(f"\n{'='*60}")
-		print(f"Training with physics_weight={pw}")
-		print(f"{'='*60}")
-
-		tracker = CarbonTracker(epochs=1)
-		tracker.epoch_start()
-
-		model = MLPWithPhysics(X_train_scaled.shape[1], n_lags, feature_cols, scaler_X, scaler_y, physics_weight=pw)
-		model.compile(optimizer='adam', loss='mse', metrics=['mae'])
-
-		# Custom callback to track physics loss
-		class PhysicsLossCallback(keras.callbacks.Callback):
-			def __init__(self, model_ref):
-				super().__init__()
-				self.model_ref = model_ref
-				self.physics_losses = []
-
-			def on_epoch_end(self, epoch, logs=None):
-				# Compute physics loss on a sample batch
-				sample_batch = X_train_scaled[:64]
-				sample_pred = self.model_ref(sample_batch, training=False)
-				phys_loss = self.model_ref.compute_physics_loss(
-					tf.constant(sample_batch, dtype=tf.float32),
-					sample_pred
-				)
-				self.physics_losses.append(float(phys_loss.numpy()) if isinstance(phys_loss, tf.Tensor) else float(phys_loss))
-
-				if (epoch + 1) % 10 == 0 or epoch == 0:
-					print(f"Epoch {epoch+1} - Physics Loss: {self.physics_losses[-1]:.6f}")
-
-		physics_callback = PhysicsLossCallback(model)
-
-		history = model.fit(X_train_scaled, y_train_scaled, epochs=10, batch_size=32,
-		                    validation_data=(X_val_scaled, y_val_scaled),
-		                    callbacks=[physics_callback],
-		                    verbose=1)
-
-		tracker.epoch_end()
-
-		model_name = f"MLP_Physics_pw{pw}_lags{n_lags}_{dataset_name}"
-
-		# Plot training loss with physics component
-		plt.figure(figsize=(12, 5))
-
-		plt.subplot(1, 2, 1)
-		plt.plot(history.history['loss'], label='Train Loss')
-		plt.plot(history.history['val_loss'], label='Val Loss')
-		plt.xlabel('Epoch')
-		plt.ylabel('Total Loss')
-		plt.title('Training and Validation Loss')
-		plt.legend()
-		plt.grid(True)
-
-		plt.subplot(1, 2, 2)
-		if pw > 0:
-			plt.plot(physics_callback.physics_losses, label='Physics Loss')
-			plt.xlabel('Epoch')
-			plt.ylabel('Physics Loss')
-			plt.title('Physics Loss Over Time')
-			plt.legend()
-			plt.grid(True)
-			plt.yscale('log')
-
-		plt.tight_layout()
-		plt.savefig(f'model_performance/{model_name}_training_loss.png', dpi=300, bbox_inches='tight')
-		plt.close()
-
-		# Evaluate
-		for split_name, X_split, y_split_real in [
-			('train', X_train_scaled, y_train),
-			('val', X_val_scaled, y_val),
-			('test', X_test_scaled, y_test)
-		]:
-			y_pred_scaled = model.predict(X_split, verbose=0).flatten()
-			y_pred_real = scaler_y.inverse_transform(y_pred_scaled.reshape(-1, 1)).flatten()
-
-			r2 = r2_score(y_split_real, y_pred_real)
-			mse = mean_squared_error(y_split_real, y_pred_real)
-			mae = mean_absolute_error(y_split_real, y_pred_real)
-			print(f"{split_name.capitalize():5s} - R²: {r2:.4f}, MSE: {mse:.4f}, MAE: {mae:.4f}")
-			plot_actual_vs_predicted(y_split_real, y_pred_real, split_name, model_name)
+	return splits, scaler_X, scaler_y, feature_cols
 
 
-OUTPUT_DIR = "output"
-regular_path = os.path.join(OUTPUT_DIR, "SPEED_TRIALS_REGULAR_FINAL.csv")
-weather_path = os.path.join(OUTPUT_DIR, "SPEED_TRIALS_WEATHER_FINAL.csv")
+def train_model(data, dataset_name, target_col, config):
+	splits, scaler_X, scaler_y, feature_cols = prepare_data(
+		data, target_col, config['n_lags'], config['batch_size']
+	)
 
-if os.path.exists(regular_path) and os.path.exists(weather_path):
-	speed_trials_regular = pd.read_csv(regular_path)
-	speed_trials_weather = pd.read_csv(weather_path)
+	model_name = f"MLP_PINN_{dataset_name}"
 
-	train_and_evaluate(speed_trials_regular, "Regular", n_lags=30)
-	train_and_evaluate(speed_trials_weather, "Weather", n_lags=30)
-else:
-	print("ERROR: Run pre_process.py first!")
+	print(f"\nTraining MLP with architecture {config['architecture']}")
+	print(f"Batch size: {config['batch_size']}, Physics weight: {config['physics_weight']}")
+
+	tracker = CarbonTracker(epochs=1)
+	tracker.epoch_start()
+
+	model = MLPWithPhysics(
+		splits['X_train'].shape[1], config['n_lags'], feature_cols,
+		scaler_X, scaler_y, config['physics_weight'], config['architecture']
+	)
+	model.compile(optimizer=Adam(learning_rate=config['learning_rate']))
+
+	history = train_with_tracking(
+		model, splits['X_train'], splits['y_train'],
+		splits['X_val'], splits['y_val'],
+		epochs=config['epochs'], batch_size=config['batch_size'],
+		patience=config['patience']
+	)
+
+	tracker.epoch_end()
+	plot_training_loss(history, model_name)
+
+	train_metrics = evaluate_model(model, splits['X_train'], splits['y_train'], scaler_y, 'train', model_name)
+	val_metrics = evaluate_model(model, splits['X_val'], splits['y_val'], scaler_y, 'val', model_name)
+	test_metrics = evaluate_model(model, splits['X_test'], splits['y_test'], scaler_y, 'test', model_name)
+
+	print(f"\nTrain - R²: {train_metrics['r2']:.4f}, MSE: {train_metrics['mse']:.2f}, MAE: {train_metrics['mae']:.2f}")
+	print(f"Val   - R²: {val_metrics['r2']:.4f}, MSE: {val_metrics['mse']:.2f}, MAE: {val_metrics['mae']:.2f}")
+	print(f"Test  - R²: {test_metrics['r2']:.4f}, MSE: {test_metrics['mse']:.2f}, MAE: {test_metrics['mae']:.2f}")
+
+	return {
+		'dataset': dataset_name,
+		'architecture': config['architecture'],
+		'batch_size': config['batch_size'],
+		'physics_weight': config['physics_weight'],
+		'metrics': {
+			'train': train_metrics,
+			'val': val_metrics,
+			'test': test_metrics
+		}
+	}
+
+
+if __name__ == "__main__":
+	OUTPUT_DIR = "output"
+	regular_path = os.path.join(OUTPUT_DIR, "SPEED_TRIALS_REGULAR_FINAL.csv")
+	weather_path = os.path.join(OUTPUT_DIR, "SPEED_TRIALS_WEATHER_FINAL.csv")
+
+	if os.path.exists(regular_path) and os.path.exists(weather_path):
+		target_col = 'OPC_12_CPP_ENGINE_POWER'
+
+		all_results = []
+
+		for physics_weight in CONFIG['physics_weights']:
+			print(f"\n{'='*70}")
+			print(f"Training with physics_weight = {physics_weight}")
+			print(f"{'='*70}")
+
+			# Create config copy with current physics weight
+			current_config = CONFIG.copy()
+			current_config['physics_weight'] = physics_weight
+
+			speed_trials_regular = pd.read_csv(regular_path)
+			print(f"\nTraining on Regular dataset (λ={physics_weight})...")
+			results_regular = train_model(speed_trials_regular, "Regular", target_col, current_config)
+			all_results.append(results_regular)
+
+			speed_trials_weather = pd.read_csv(weather_path)
+			print(f"\nTraining on Weather dataset (λ={physics_weight})...")
+			results_weather = train_model(speed_trials_weather, "Weather", target_col, current_config)
+			all_results.append(results_weather)
+
+		# Save results to JSON
+		timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+		output_file = f'{CONFIG["output_dir"]}/mlp_results_{timestamp}.json'
+		with open(output_file, 'w') as f:
+			json.dump(all_results, f, indent=2)
+		print(f"\n{'='*70}")
+		print(f"Results saved to: {output_file}")
+		print(f"{'='*70}")
+	else:
+		print("ERROR: Run pre_process.py first!")

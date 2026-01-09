@@ -1,7 +1,7 @@
 """
-LSTM with Physics-Informed Neural Networks
-Best configuration: Double [64, 32], Batch 32, Physics 0.001
-Uses non-overlapping sequences with batch-based splitting
+LSTM with Physics-Informed Neural Networks - OPTIMIZATION VERSION
+Tests multiple physics weights to find optimal configuration
+CORRECTED: No data leakage - splits before scaling
 """
 
 import numpy as np
@@ -18,13 +18,13 @@ from carbontracker.tracker import CarbonTracker
 from datetime import datetime
 import json
 
-# Configuration - Best performing model
+
+# Configuration
 CONFIG = {
 	'output_dir': 'model_performance',
-	'layer1_units': 64,
-	'layer2_units': 32,
-	'batch_size': 32,
-	'physics_weights': [0.0, 0.001],  # Compare baseline vs best physics
+	'architectures': [[64, 32], [32, 16], [128, 64]],
+	'batch_sizes': [16, 32],
+	'physics_weights': [0.0, 0.001, 0.01],
 	'timesteps': 30,
 	'epochs': 20,
 	'patience': 7,
@@ -33,13 +33,11 @@ CONFIG = {
 }
 
 EXCLUDE_COLS = [
-	"OPC_12_CPP_ENGINE_POWER",
 	"OPC_13_PROP_POWER", "PROP_SHAFT_POWER_KMT", "OPC_08_GROUND_SPEED",
 	"elapsed_seconds", "hour", "minute", "second", "dataset_id",
 	"GPS_GPGGA_Latitude", "GPS_GPGGA_Longitude", "GPS_GPGGA_UTC_time", "Date", "Time",
 	"OPC_17_VES_DRAFT_MID_SB", "OPC_14_VES_DRAFT_FWD", "OPC_16_VES_DRAFT_MID_PS", "OPC_15_VES_DRAFT_AFT"
 ]
-
 SHIP_PARAMS = {
 	'DP': 6.5, 'k0': 0.5453, 'k1': -0.4399, 'k2': -0.0379,
 	'tP': 0.1, 'wP0': 0.16, 'xP_prime': -0.5, 'L': 214.0
@@ -48,6 +46,7 @@ SHIP_PARAMS = {
 os.makedirs(CONFIG['output_dir'], exist_ok=True)
 
 
+# Physics
 def compute_propeller_force(u, v, r, nP, params):
 	rho = 1025.0
 	beta = tf.math.atan2(-v, u)
@@ -62,23 +61,95 @@ def compute_propeller_force(u, v, r, nP, params):
 	return XP
 
 
+# Plotting
+def plot_actual_vs_predicted(y_true, y_pred, split_name, model_name):
+	plt.figure(figsize=(15, 5))
+	plt.plot(y_true[:1000], label='Actual', alpha=0.7)
+	plt.plot(y_pred[:1000], label='Predicted', alpha=0.7)
+	plt.xlabel('Time Step')
+	plt.ylabel('Engine Power (kW)')
+	plt.title(f'Actual vs Predicted - {split_name}')
+	plt.legend()
+	plt.grid(True)
+	plt.savefig(f"{CONFIG['output_dir']}/{model_name}_{split_name}_actual_vs_predicted.png", dpi=300, bbox_inches='tight')
+	plt.close()
+
+
+def plot_prediction_errors(y_true, y_pred, split_name, model_name):
+	errors = y_true - y_pred
+	plt.figure(figsize=(15, 5))
+	plt.plot(errors[:1000])
+	plt.xlabel('Time Step')
+	plt.ylabel('Prediction Error (kW)')
+	plt.title(f'Prediction Errors - {split_name}')
+	plt.axhline(y=0, color='r', linestyle='--', alpha=0.5)
+	plt.grid(True)
+	plt.savefig(f"{CONFIG['output_dir']}/{model_name}_{split_name}_prediction_errors.png", dpi=300, bbox_inches='tight')
+	plt.close()
+
+
+def plot_error_variance(y_true, y_pred, split_name, model_name):
+	errors = y_true - y_pred
+	plt.figure(figsize=(10, 5))
+	plt.hist(errors, bins=50, edgecolor='black', alpha=0.7)
+	plt.xlabel('Prediction Error (kW)')
+	plt.ylabel('Frequency')
+	plt.title(f'Error Distribution - {split_name}')
+	plt.axvline(x=0, color='r', linestyle='--', alpha=0.5)
+	plt.grid(True)
+	plt.savefig(f"{CONFIG['output_dir']}/{model_name}_{split_name}_error_distribution.png", dpi=300, bbox_inches='tight')
+	plt.close()
+
+
+def plot_training_loss(history, model_name):
+	plt.figure(figsize=(12, 5))
+	plt.subplot(1, 2, 1)
+	plt.plot(history['loss'], label='Train Loss')
+	plt.plot(history['val_loss'], label='Val Loss')
+	plt.xlabel('Epoch')
+	plt.ylabel('Total Loss')
+	plt.title('Training and Validation Loss')
+	plt.legend()
+	plt.grid(True)
+
+	plt.subplot(1, 2, 2)
+	plt.plot(history['data_loss'], label='Data Loss')
+	plt.plot(history['physics_loss'], label='Physics Loss')
+	plt.xlabel('Epoch')
+	plt.ylabel('Loss Component')
+	plt.title('Loss Components')
+	plt.legend()
+	plt.grid(True)
+	plt.yscale('log')
+
+	plt.tight_layout()
+	plt.savefig(f"{CONFIG['output_dir']}/{model_name}_training_loss.png", dpi=300, bbox_inches='tight')
+	plt.close()
+
+
+# Model
 class LSTM_PINN(keras.Model):
-	def __init__(self, lstm_config):
+	def __init__(self, architecture, dropout_rate):
 		super().__init__()
-		self.lstm1 = LSTM(lstm_config['layer1_units'], return_sequences=True)
-		self.dropout1 = Dropout(lstm_config['dropout_rate'])
-		self.lstm2 = LSTM(lstm_config['layer2_units'], return_sequences=False)
-		self.dropout2 = Dropout(lstm_config['dropout_rate'])
+		self.lstm_layers = []
+		self.dropout_layers = []
+
+		for i, units in enumerate(architecture):
+			return_sequences = (i < len(architecture) - 1)
+			self.lstm_layers.append(LSTM(units, return_sequences=return_sequences))
+			self.dropout_layers.append(Dropout(dropout_rate))
+
 		self.output_layer = Dense(1)
 
 	def call(self, inputs):
-		x = self.lstm1(inputs)
-		x = self.dropout1(x)
-		x = self.lstm2(x)
-		x = self.dropout2(x)
+		x = inputs
+		for lstm, dropout in zip(self.lstm_layers, self.dropout_layers):
+			x = lstm(x)
+			x = dropout(x)
 		return self.output_layer(x)
 
 
+# Trainer
 class PINNTrainer:
 	def __init__(self, model, ship_params, column_mapping, scaler_X, scaler_y, physics_weight, learning_rate):
 		self.model = model
@@ -107,17 +178,23 @@ class PINNTrainer:
 		return u, v, r, nP
 
 	def compute_physics_loss(self, inputs, predictions):
-		u, v, r, nP = self.descale_features(inputs)
-		model_power_kW = predictions[:, 0] * self.scaler_y_std + self.scaler_y_mean
+		if len(self.column_mapping) < 4:
+			return tf.constant(0.0)
 
-		XP = compute_propeller_force(u, v, r, nP, self.ship_params)
-		wP = self.ship_params['wP0'] * tf.exp(-4 * (tf.math.atan2(-v, u) - self.ship_params['xP_prime'] *
-		                                            tf.where(tf.abs(u) > 1e-6, r * self.ship_params['L'] / u, 0.0))**2)
-		uP = u * (1 - wP)
-		physics_power_kW = (XP * uP) / 1000.0
+		try:
+			u, v, r, nP = self.descale_features(inputs)
+			model_power_kW = predictions[:, 0] * self.scaler_y_std + self.scaler_y_mean
 
-		physics_residual = tf.reduce_mean(tf.square((physics_power_kW - model_power_kW) / 1000.0))
-		return physics_residual
+			XP = compute_propeller_force(u, v, r, nP, self.ship_params)
+			wP = self.ship_params['wP0'] * tf.exp(-4 * (tf.math.atan2(-v, u) - self.ship_params['xP_prime'] *
+			                                            tf.where(tf.abs(u) > 1e-6, r * self.ship_params['L'] / u, 0.0))**2)
+			uP = u * (1 - wP)
+			physics_power_kW = (XP * uP) / 1000.0
+
+			physics_residual = tf.reduce_mean(tf.square((physics_power_kW - model_power_kW) / 1000.0))
+			return physics_residual
+		except:
+			return tf.constant(0.0)
 
 	@tf.function
 	def train_step(self, X_batch, y_batch):
@@ -172,69 +249,78 @@ class PINNTrainer:
 		return history
 
 
-def plot_training_loss(history, model_name):
-	plt.figure(figsize=(12, 5))
-	plt.subplot(1, 2, 1)
-	plt.plot(history['loss'], label='Train Loss')
-	plt.plot(history['val_loss'], label='Val Loss')
-	plt.xlabel('Epoch')
-	plt.ylabel('Total Loss')
-	plt.title('Training and Validation Loss')
-	plt.legend()
-	plt.grid(True)
+def prepare_data(data, target_col, timesteps):
+	"""CORRECTED: Split BEFORE scaling to prevent data leakage"""
+	all_exclude = EXCLUDE_COLS + [target_col]
+	numeric_cols = data.select_dtypes(include=[np.number]).columns.tolist()
+	feature_cols = [col for col in numeric_cols if col not in all_exclude]
 
-	plt.subplot(1, 2, 2)
-	plt.plot(history['data_loss'], label='Data Loss')
-	plt.plot(history['physics_loss'], label='Physics Loss')
-	plt.xlabel('Epoch')
-	plt.ylabel('Loss Component')
-	plt.title('Loss Components')
-	plt.legend()
-	plt.grid(True)
-	plt.yscale('log')
+	X = data[feature_cols]
+	y = data[target_col]
 
-	plt.tight_layout()
-	plt.savefig(f"{CONFIG['output_dir']}/{model_name}_training_loss.png", dpi=300, bbox_inches='tight')
-	plt.close()
+	valid_mask = ~(X.isna().any(axis=1) | y.isna())
+	X = X[valid_mask]
+	y = y[valid_mask]
 
+	# CRITICAL: Split BEFORE scaling
+	train_size = int(len(X) * 0.6)
+	val_size = int(len(X) * 0.2)
 
-def plot_actual_vs_predicted(y_true, y_pred, split_name, model_name):
-	plt.figure(figsize=(15, 5))
-	plt.plot(y_true[:1000], label='Actual', alpha=0.7)
-	plt.plot(y_pred[:1000], label='Predicted', alpha=0.7)
-	plt.xlabel('Time Step')
-	plt.ylabel('Engine Power (kW)')
-	plt.title(f'Actual vs Predicted - {split_name}')
-	plt.legend()
-	plt.grid(True)
-	plt.savefig(f"{CONFIG['output_dir']}/{model_name}_{split_name}_actual_vs_predicted.png", dpi=300, bbox_inches='tight')
-	plt.close()
+	X_train_raw = X.iloc[:train_size]
+	y_train_raw = y.iloc[:train_size]
+	X_val_raw = X.iloc[train_size:train_size+val_size]
+	y_val_raw = y.iloc[train_size:train_size+val_size]
+	X_test_raw = X.iloc[train_size+val_size:]
+	y_test_raw = y.iloc[train_size+val_size:]
 
+	# Fit scaler ONLY on train
+	scaler_X = StandardScaler()
+	scaler_y = StandardScaler()
+	scaler_X.fit(X_train_raw)
+	scaler_y.fit(y_train_raw.values.reshape(-1, 1))
 
-def plot_prediction_errors(y_true, y_pred, split_name, model_name):
-	errors = y_true - y_pred
-	plt.figure(figsize=(15, 5))
-	plt.plot(errors[:1000])
-	plt.xlabel('Time Step')
-	plt.ylabel('Prediction Error (kW)')
-	plt.title(f'Prediction Errors - {split_name}')
-	plt.axhline(y=0, color='r', linestyle='--', alpha=0.5)
-	plt.grid(True)
-	plt.savefig(f"{CONFIG['output_dir']}/{model_name}_{split_name}_prediction_errors.png", dpi=300, bbox_inches='tight')
-	plt.close()
+	# Transform separately
+	X_train_scaled = scaler_X.transform(X_train_raw)
+	y_train_scaled = scaler_y.transform(y_train_raw.values.reshape(-1, 1)).flatten()
+	X_val_scaled = scaler_X.transform(X_val_raw)
+	y_val_scaled = scaler_y.transform(y_val_raw.values.reshape(-1, 1)).flatten()
+	X_test_scaled = scaler_X.transform(X_test_raw)
+	y_test_scaled = scaler_y.transform(y_test_raw.values.reshape(-1, 1)).flatten()
 
+	# Create sequences per split (overlapping)
+	def create_sequences(X, y, timesteps):
+		X_seq, y_seq = [], []
+		for i in range(timesteps, len(X)):
+			X_seq.append(X[i-timesteps:i])
+			y_seq.append(y[i])
+		return np.array(X_seq), np.array(y_seq)
 
-def plot_error_variance(y_true, y_pred, split_name, model_name):
-	errors = y_true - y_pred
-	plt.figure(figsize=(10, 5))
-	plt.hist(errors, bins=50, edgecolor='black', alpha=0.7)
-	plt.xlabel('Prediction Error (kW)')
-	plt.ylabel('Frequency')
-	plt.title(f'Error Distribution - {split_name}')
-	plt.axvline(x=0, color='r', linestyle='--', alpha=0.5)
-	plt.grid(True)
-	plt.savefig(f"{CONFIG['output_dir']}/{model_name}_{split_name}_error_distribution.png", dpi=300, bbox_inches='tight')
-	plt.close()
+	X_train_seq, y_train_seq = create_sequences(X_train_scaled, y_train_scaled, timesteps)
+	X_val_seq, y_val_seq = create_sequences(X_val_scaled, y_val_scaled, timesteps)
+	X_test_seq, y_test_seq = create_sequences(X_test_scaled, y_test_scaled, timesteps)
+
+	# Column mapping
+	column_mapping = {}
+	for i, col in enumerate(feature_cols):
+		if col == 'v_ms':
+			column_mapping['v'] = i
+		elif col == 'OPC_07_WATER_SPEED':
+			column_mapping['u'] = i
+		elif col == 'GPS_HDG_HEADING_ROT_S':
+			column_mapping['r'] = i
+		elif col == 'OPC_40_PROP_RPM_FB':
+			column_mapping['nP'] = i
+
+	splits = {
+		'X_train': tf.convert_to_tensor(X_train_seq, dtype=tf.float32),
+		'y_train': tf.convert_to_tensor(y_train_seq, dtype=tf.float32),
+		'X_val': tf.convert_to_tensor(X_val_seq, dtype=tf.float32),
+		'y_val': tf.convert_to_tensor(y_val_seq, dtype=tf.float32),
+		'X_test': tf.convert_to_tensor(X_test_seq, dtype=tf.float32),
+		'y_test': tf.convert_to_tensor(y_test_seq, dtype=tf.float32)
+	}
+
+	return splits, scaler_X, scaler_y, column_mapping
 
 
 def evaluate_model(model, X, y, scaler_y, split_name, model_name):
@@ -259,126 +345,61 @@ def evaluate_model(model, X, y, scaler_y, split_name, model_name):
 	return metrics
 
 
-def prepare_data(data, target_col, timesteps, batch_size):
-	all_exclude = EXCLUDE_COLS + [target_col]
-	numeric_cols = data.select_dtypes(include=[np.number]).columns.tolist()
-	feature_cols = [col for col in numeric_cols if col not in all_exclude]
-
-	X = data[feature_cols]
-	y = data[target_col]
-
-	valid_mask = ~(X.isna().any(axis=1) | y.isna())
-	X = X[valid_mask]
-	y = y[valid_mask]
-
-	# CRITICAL: Split BEFORE scaling to prevent data leakage
-	train_size = int(len(X) * 0.6)
-	val_size = int(len(X) * 0.2)
-
-	X_train_raw = X.iloc[:train_size]
-	y_train_raw = y.iloc[:train_size]
-	X_val_raw = X.iloc[train_size:train_size+val_size]
-	y_val_raw = y.iloc[train_size:train_size+val_size]
-	X_test_raw = X.iloc[train_size+val_size:]
-	y_test_raw = y.iloc[train_size+val_size:]
-
-	# Fit scaler ONLY on train data
-	scaler_X = StandardScaler()
-	scaler_y = StandardScaler()
-	scaler_X.fit(X_train_raw)
-	scaler_y.fit(y_train_raw.values.reshape(-1, 1))
-
-	# Transform each split separately
-	X_train_scaled = scaler_X.transform(X_train_raw)
-	y_train_scaled = scaler_y.transform(y_train_raw.values.reshape(-1, 1)).flatten()
-	X_val_scaled = scaler_X.transform(X_val_raw)
-	y_val_scaled = scaler_y.transform(y_val_raw.values.reshape(-1, 1)).flatten()
-	X_test_scaled = scaler_X.transform(X_test_raw)
-	y_test_scaled = scaler_y.transform(y_test_raw.values.reshape(-1, 1)).flatten()
-
-	# Create sequences for each split (overlapping, stride=1)
-	def create_sequences(X, y, timesteps):
-		X_seq, y_seq = [], []
-		for i in range(timesteps, len(X)):
-			X_seq.append(X[i-timesteps:i])
-			y_seq.append(y[i])
-		return np.array(X_seq), np.array(y_seq)
-
-	X_train_seq, y_train_seq = create_sequences(X_train_scaled, y_train_scaled, timesteps)
-	X_val_seq, y_val_seq = create_sequences(X_val_scaled, y_val_scaled, timesteps)
-	X_test_seq, y_test_seq = create_sequences(X_test_scaled, y_test_scaled, timesteps)
-
-	# Column mapping for physics
-	column_mapping = {}
-	for i, col in enumerate(feature_cols):
-		if col == 'v_ms':
-			column_mapping['v'] = i
-		elif col == 'OPC_07_WATER_SPEED':
-			column_mapping['u'] = i
-		elif col == 'GPS_HDG_HEADING_ROT_S':
-			column_mapping['r'] = i
-		elif col == 'OPC_40_PROP_RPM_FB':
-			column_mapping['nP'] = i
-
-	splits = {
-		'X_train': tf.convert_to_tensor(X_train_seq, dtype=tf.float32),
-		'y_train': tf.convert_to_tensor(y_train_seq, dtype=tf.float32),
-		'X_val': tf.convert_to_tensor(X_val_seq, dtype=tf.float32),
-		'y_val': tf.convert_to_tensor(y_val_seq, dtype=tf.float32),
-		'X_test': tf.convert_to_tensor(X_test_seq, dtype=tf.float32),
-		'y_test': tf.convert_to_tensor(y_test_seq, dtype=tf.float32)
-	}
-
-	return splits, scaler_X, scaler_y, column_mapping
-
-
-def train_model(data, dataset_name, target_col, config):
-	splits, scaler_X, scaler_y, column_mapping = prepare_data(
-		data, target_col, config['timesteps'], config['batch_size']
-	)
-
-	model_name = f"LSTM_PINN_{dataset_name}"
-
-	print(f"\nTraining LSTM with units [{config['layer1_units']}, {config['layer2_units']}]")
-	print(f"Batch size: {config['batch_size']}, Physics weight: {config['physics_weight']}")
+def train_single_model(splits, scaler_X, scaler_y, column_mapping, architecture, batch_size, physics_weight, config):
+	model_name = f"LSTM_PINN_arch{'_'.join(map(str,architecture))}_bs{batch_size}_pw{physics_weight}"
 
 	tracker = CarbonTracker(epochs=1)
 	tracker.epoch_start()
 
-	lstm_config = {
-		'layer1_units': config['layer1_units'],
-		'layer2_units': config['layer2_units'],
-		'dropout_rate': config['dropout_rate']
-	}
-
-	model = LSTM_PINN(lstm_config)
+	model = LSTM_PINN(architecture, config['dropout_rate'])
 	trainer = PINNTrainer(model, SHIP_PARAMS, column_mapping, scaler_X, scaler_y,
-	                      config['physics_weight'], config['learning_rate'])
+	                      physics_weight, config['learning_rate'])
 	history = trainer.fit(splits['X_train'], splits['y_train'], splits['X_val'], splits['y_val'],
-	                      config['epochs'], config['batch_size'], config['patience'])
+	                      config['epochs'], batch_size, config['patience'])
 
 	tracker.epoch_end()
 	plot_training_loss(history, model_name)
 
-	train_metrics = evaluate_model(model, splits['X_train'], splits['y_train'], scaler_y, 'train', model_name)
-	val_metrics = evaluate_model(model, splits['X_val'], splits['y_val'], scaler_y, 'val', model_name)
-	test_metrics = evaluate_model(model, splits['X_test'], splits['y_test'], scaler_y, 'test', model_name)
+	results = {'architecture': architecture, 'batch_size': batch_size, 'physics_weight': physics_weight}
+	for split_name in ['train', 'val', 'test']:
+		X_key = f'X_{split_name}' if split_name != 'val' else 'X_val'
+		y_key = f'y_{split_name}' if split_name != 'val' else 'y_val'
+		metrics = evaluate_model(model, splits[X_key], splits[y_key], scaler_y, split_name, model_name)
+		results[f'{split_name}_r2'] = metrics['r2']
+		results[f'{split_name}_mse'] = metrics['mse']
+		results[f'{split_name}_mae'] = metrics['mae']
 
-	print(f"\nTrain - R²: {train_metrics['r2']:.4f}, MSE: {train_metrics['mse']:.2f}, MAE: {train_metrics['mae']:.2f}")
-	print(f"Val   - R²: {val_metrics['r2']:.4f}, MSE: {val_metrics['mse']:.2f}, MAE: {val_metrics['mae']:.2f}")
-	print(f"Test  - R²: {test_metrics['r2']:.4f}, MSE: {test_metrics['mse']:.2f}, MAE: {test_metrics['mae']:.2f}")
+	return results
 
-	return {
-		'dataset': dataset_name,
-		'architecture': [config['layer1_units'], config['layer2_units']],
-		'batch_size': config['batch_size'],
-		'physics_weight': config['physics_weight'],
-		'metrics': {
-			'train': train_metrics,
-			'val': val_metrics,
-			'test': test_metrics
-		}
-	}
+
+def run_optimization(data, dataset_name, target_col, config):
+	print(f"\n{'='*70}")
+	print(f"OPTIMIZING LSTM ON {dataset_name.upper()} DATASET")
+	print(f"{'='*70}")
+
+	splits, scaler_X, scaler_y, column_mapping = prepare_data(data, target_col, config['timesteps'])
+
+	print(f"Train samples: {len(splits['X_train'])}")
+	print(f"Val samples: {len(splits['X_val'])}")
+	print(f"Test samples: {len(splits['X_test'])}")
+
+	results = []
+	total_configs = len(config['architectures']) * len(config['batch_sizes']) * len(config['physics_weights'])
+	current = 0
+
+	for arch in config['architectures']:
+		for batch_size in config['batch_sizes']:
+			for physics_weight in config['physics_weights']:
+				current += 1
+				print(f"\n[{current}/{total_configs}] Training: arch={arch}, batch={batch_size}, physics={physics_weight}")
+
+				result = train_single_model(splits, scaler_X, scaler_y, column_mapping,
+				                            arch, batch_size, physics_weight, config)
+				results.append(result)
+
+				print(f"  Test R²: {result['test_r2']:.4f}, MSE: {result['test_mse']:.2f}, MAE: {result['test_mae']:.2f}")
+
+	return results
 
 
 if __name__ == "__main__":
@@ -387,34 +408,21 @@ if __name__ == "__main__":
 	weather_path = os.path.join(OUTPUT_DIR, "SPEED_TRIALS_WEATHER_FINAL.csv")
 
 	if os.path.exists(regular_path) and os.path.exists(weather_path):
+		speed_trials_regular = pd.read_csv(regular_path)
+		speed_trials_weather = pd.read_csv(weather_path)
 		target_col = 'OPC_12_CPP_ENGINE_POWER'
 
-		all_results = []
+		results_regular = run_optimization(speed_trials_regular, "Regular", target_col, CONFIG)
+		results_weather = run_optimization(speed_trials_weather, "Weather", target_col, CONFIG)
 
-		for physics_weight in CONFIG['physics_weights']:
-			print(f"\n{'='*70}")
-			print(f"Training with physics_weight = {physics_weight}")
-			print(f"{'='*70}")
-
-			# Create config copy with current physics weight
-			current_config = CONFIG.copy()
-			current_config['physics_weight'] = physics_weight
-
-			speed_trials_regular = pd.read_csv(regular_path)
-			print(f"\nTraining on Regular dataset (λ={physics_weight})...")
-			results_regular = train_model(speed_trials_regular, "Regular", target_col, current_config)
-			all_results.append(results_regular)
-
-			speed_trials_weather = pd.read_csv(weather_path)
-			print(f"\nTraining on Weather dataset (λ={physics_weight})...")
-			results_weather = train_model(speed_trials_weather, "Weather", target_col, current_config)
-			all_results.append(results_weather)
-
-		# Save results to JSON
+		# Save results
 		timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-		output_file = f'{CONFIG["output_dir"]}/lstm_results_{timestamp}.json'
+		output_file = f'{CONFIG["output_dir"]}/lstm_optimization_results_{timestamp}.json'
 		with open(output_file, 'w') as f:
-			json.dump(all_results, f, indent=2)
+			json.dump({
+				'regular': results_regular,
+				'weather': results_weather
+			}, f, indent=2)
 		print(f"\n{'='*70}")
 		print(f"Results saved to: {output_file}")
 		print(f"{'='*70}")
