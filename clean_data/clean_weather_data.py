@@ -50,8 +50,8 @@ def clean_weather_data(verbose=True):
             for col in weather_columns:
                 speed_trials_weather.at[idx, col] = weather_data.at[match_idx, col]
 
-    # Create elapsed_seconds for interpolation
-    speed_trials_weather['elapsed_seconds'] = (
+    # Create elapsed_seconds for interpolation (temporary - will be dropped to match regular data)
+    speed_trials_weather['elapsed_seconds_temp'] = (
             speed_trials_weather['datetime_temp'] - speed_trials_weather['datetime_temp'].min()
     ).dt.total_seconds()
 
@@ -69,7 +69,7 @@ def clean_weather_data(verbose=True):
         if col not in speed_trials_weather.columns:
             continue
 
-        x = speed_trials_weather['elapsed_seconds'].values
+        x = speed_trials_weather['elapsed_seconds_temp'].values
         y = speed_trials_weather[col].values
         valid_idx = ~np.isnan(y)
 
@@ -77,6 +77,12 @@ def clean_weather_data(verbose=True):
             continue
 
         speed_trials_weather[col] = speed_trials_weather[col].interpolate(method='linear', limit_direction='both')
+
+    # CRITICAL FIX: Drop elapsed_seconds_temp to match regular data feature space
+    if 'elapsed_seconds_temp' in speed_trials_weather.columns:
+        speed_trials_weather = speed_trials_weather.drop(columns=['elapsed_seconds_temp'])
+        if verbose:
+            print(f"  Dropped elapsed_seconds_temp to match regular data")
 
     if verbose:
         print(f"Final shape: {speed_trials_weather.shape}")

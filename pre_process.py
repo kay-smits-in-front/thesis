@@ -65,18 +65,22 @@ def remove_anomalies(data, target_col, contamination=0.05):
 	"""Remove overlapping anomalies detected by both IF and LOF."""
 	print(f"\nStep 3: Detecting anomalies...")
 
-	# Exclude columns
+	# Exclude columns (including weather-specific features to avoid bias)
 	exclude_cols = ["OPC_41_PITCH_FB", "OPC_13_PROP_POWER", "PROP_SHAFT_POWER_KMT", "OPC_08_GROUND_SPEED",
-	                "elapsed_seconds", "hour", "minute", "second", "dataset_id",
+	                "elapsed_seconds", "elapsed_seconds_temp", "hour", "minute", "second", "dataset_id",
 	                "GPS_GPGGA_Latitude", "GPS_GPGGA_Longitude", "GPS_GPGGA_UTC_time", "Date", "Time",
 	                "Unnamed: 23", "GPS_HDG_HEADING_ROT_S", "OPC_07_WATER_SPEED", "OPC_40_PROP_RPM_FB",
-	                target_col]
+	                target_col,
+	                # Weather-specific features (exclude from anomaly detection to avoid bias)
+	                "mean_wave_direction", "mean_wave_period", "significant_wave_height",
+	                "wind_u_component_10m", "wind_v_component_10m", "air_density",
+	                "wind_speed_10m", "wind_direction_10m"]
 
 	numeric_data = data.select_dtypes(include=[np.number])
 	feature_data = numeric_data.drop(columns=exclude_cols, errors='ignore')
 	data_clean = feature_data.dropna()
 
-	print(f"  Using {len(feature_data.columns)} features")
+	print(f"  Using {len(feature_data.columns)} features (weather features excluded for fair comparison)")
 	print(f"  Analyzing {len(data_clean)} rows")
 
 	# Scale data for anomaly detection
