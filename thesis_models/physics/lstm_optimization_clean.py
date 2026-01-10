@@ -1,5 +1,5 @@
 """
-LSTM Optimization with Lle Early Pruning
+LSTM Optimization with Simple Early Pruning
 Tests architectures and batch sizes efficiently (NO physics - data-only)
 Prunes poorly performing architectures early to save compute time
 """
@@ -11,7 +11,7 @@ import json
 from datetime import datetime
 import tensorflow as tf
 from tensorflow import keras
-from tensorflow.keras.layers import LleLSTM, Dense, Dropout
+from tensorflow.keras.layers import LSTM, Dense, Dropout
 from tensorflow.keras.optimizers import Adam
 from sklearn.preprocessing import StandardScaler
 from sklearn.metrics import r2_score, mean_squared_error, mean_absolute_error
@@ -50,21 +50,21 @@ def create_sequences_rnn(X, y, timesteps):
 
 
 class LSTMModel(keras.Model):
-	"""Lle LSTM model for data-only training"""
+	"""Simple LSTM model for data-only training"""
 	def __init__(self, architecture, dropout_rate):
 		super().__init__()
-		self.rnn_layers = []
+		self.lstm_layers = []
 		self.dropout_layers = []
 		for i, units in enumerate(architecture):
 			return_seq = (i < len(architecture) - 1)
-			self.rnn_layers.append(LleLSTM(units, return_sequences=return_seq))
+			self.lstm_layers.append(LSTM(units, return_sequences=return_seq))
 			self.dropout_layers.append(Dropout(dropout_rate))
 		self.output_layer = Dense(1)
 
 	def call(self, inputs):
 		x = inputs
-		for rnn, dropout in zip(self.rnn_layers, self.dropout_layers):
-			x = rnn(x)
+		for lstm, dropout in zip(self.lstm_layers, self.dropout_layers):
+			x = lstm(x)
 			x = dropout(x)
 		return self.output_layer(x)
 
@@ -121,7 +121,7 @@ def prepare_data(df, target_col, timesteps):
 
 def train_single_model(splits, scaler_y, architecture, batch_size, config):
 	"""Train a single model configuration"""
-	model = MLPModel(architecture, config['dropout_rate'])
+	model = LSTMModel(architecture, config['dropout_rate'])
 	model.compile(optimizer=Adam(learning_rate=config['learning_rate']), loss='mse')
 
 	# Early stopping
@@ -246,7 +246,7 @@ if __name__ == "__main__":
 
 		# Save results
 		timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-		output_file = f'{CONFIG["output_dir"]}/mlp_optimization_{timestamp}.json'
+		output_file = f'{CONFIG["output_dir"]}/lstm_optimization_{timestamp}.json'
 		with open(output_file, 'w') as f:
 			json.dump(optimization_results, f, indent=2, default=str)
 		print(f"\nResults saved to: {output_file}")

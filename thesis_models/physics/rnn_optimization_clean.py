@@ -221,7 +221,7 @@ if __name__ == "__main__":
 
 		# Save results
 		timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-		output_file = f'{CONFIG["output_dir"]}/rnn_optimization_clean_{timestamp}.json'
+		output_file = f'{CONFIG["output_dir"]}/rnn_optimization_{timestamp}.json'
 		with open(output_file, 'w') as f:
 			json.dump(results, f, indent=2)
 		print(f"\nResults saved to: {output_file}")
