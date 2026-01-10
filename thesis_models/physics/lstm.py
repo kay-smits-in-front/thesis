@@ -137,7 +137,8 @@ class PINNTrainer:
 
 	def fit(self, X_train, y_train, X_val, y_val, epochs, batch_size, patience):
 		train_dataset = tf.data.Dataset.from_tensor_slices((X_train, y_train)).batch(batch_size)
-		history = {'loss': [], 'data_loss': [], 'physics_loss': [], 'val_loss': []}
+		history = {'loss': [], 'data_loss': [], 'physics_loss': [], 'val_loss': [],
+		           'val_data_loss': [], 'val_physics_loss': []}
 		best_val_loss = float('inf')
 		patience_counter = 0
 
@@ -151,15 +152,22 @@ class PINNTrainer:
 				epoch_physics_loss.append(float(physics_loss) if isinstance(physics_loss, tf.Tensor) else physics_loss)
 
 			val_pred = self.model(X_val, training=False)
-			val_loss = tf.reduce_mean(tf.square(y_val - val_pred)).numpy()
+			val_data_loss = tf.reduce_mean(tf.square(y_val - val_pred))
+			if self.physics_weight > 0:
+				val_physics_loss = self.compute_physics_loss(X_val, val_pred)
+			else:
+				val_physics_loss = tf.constant(0.0)
+			val_total_loss = val_data_loss + self.physics_weight * val_physics_loss
 
 			history['loss'].append(np.mean(epoch_loss))
 			history['data_loss'].append(np.mean(epoch_data_loss))
 			history['physics_loss'].append(np.mean(epoch_physics_loss))
-			history['val_loss'].append(val_loss)
+			history['val_loss'].append(float(val_total_loss.numpy()))
+			history['val_data_loss'].append(float(val_data_loss.numpy()))
+			history['val_physics_loss'].append(float(val_physics_loss.numpy()))
 
-			if val_loss < best_val_loss:
-				best_val_loss = val_loss
+			if val_total_loss < best_val_loss:
+				best_val_loss = val_total_loss
 				patience_counter = 0
 			else:
 				patience_counter += 1
