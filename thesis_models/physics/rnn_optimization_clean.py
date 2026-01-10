@@ -1,7 +1,8 @@
 """
-RNN Optimization with Simple Early Pruning
-Tests architectures and batch sizes efficiently (NO physics - data-only)
-Prunes poorly performing architectures early to save compute time
+RNN Optimization - CLEAN VERSION
+Only tests physics_weight=0.0 (data-only model)
+Only uses regular dataset for faster optimization
+Tests multiple architectures and batch sizes
 """
 
 import numpy as np
@@ -19,14 +20,14 @@ from sklearn.metrics import r2_score, mean_squared_error, mean_absolute_error
 
 CONFIG = {
 	'output_dir': 'model_performance',
-	'architectures': [[128, 64, 32], [64, 32], [64]],
+	'architectures': [[64], [64, 32], [128, 64, 32]],
 	'batch_sizes': [16, 32],
+	'physics_weights': [0.0],  # ONLY data-only model (no physics)
 	'timesteps': 15,
 	'epochs': 15,
 	'patience': 7,
 	'learning_rate': 0.001,
-	'dropout_rate': 0.2,
-	'prune_threshold': 0.5  # Prune if validation R² < 0.5
+	'dropout_rate': 0.2
 }
 
 EXCLUDE_COLS = [
@@ -40,8 +41,8 @@ EXCLUDE_COLS = [
 os.makedirs(CONFIG['output_dir'], exist_ok=True)
 
 
-def create_sequences_rnn(X, y, timesteps):
-	"""Create sequences for RNN"""
+def create_sequences(X, y, timesteps):
+	"""Create sequences for RNN input"""
 	X_seq, y_seq = [], []
 	for i in range(timesteps, len(X)):
 		X_seq.append(X[i-timesteps:i])
@@ -50,15 +51,17 @@ def create_sequences_rnn(X, y, timesteps):
 
 
 class RNNModel(keras.Model):
-	"""Simple RNN model for data-only training"""
+	"""Simple RNN model for data-only training (no physics)"""
 	def __init__(self, architecture, dropout_rate):
 		super().__init__()
 		self.rnn_layers = []
 		self.dropout_layers = []
+
 		for i, units in enumerate(architecture):
-			return_seq = (i < len(architecture) - 1)
-			self.rnn_layers.append(SimpleRNN(units, return_sequences=return_seq))
+			return_sequences = (i < len(architecture) - 1)
+			self.rnn_layers.append(SimpleRNN(units, return_sequences=return_sequences))
 			self.dropout_layers.append(Dropout(dropout_rate))
+
 		self.output_layer = Dense(1)
 
 	def call(self, inputs):
@@ -69,43 +72,49 @@ class RNNModel(keras.Model):
 		return self.output_layer(x)
 
 
-def prepare_data(df, target_col, timesteps):
+def prepare_data(data, target_col, timesteps):
 	"""Prepare data with proper splitting to prevent leakage"""
 	all_exclude = EXCLUDE_COLS + [target_col]
-	numeric_cols = df.select_dtypes(include=[np.number]).columns.tolist()
+	numeric_cols = data.select_dtypes(include=[np.number]).columns.tolist()
 	feature_cols = [col for col in numeric_cols if col not in all_exclude]
-	X = df[feature_cols].values
-	y = df[target_col].values
-	
+
+	X = data[feature_cols]
+	y = data[target_col]
+
+	# Remove NaN values
+	valid_mask = ~(X.isna().any(axis=1) | y.isna())
+	X = X[valid_mask]
+	y = y[valid_mask]
+
 	# Split BEFORE scaling (60/20/20)
 	train_size = int(len(X) * 0.6)
 	val_size = int(len(X) * 0.2)
 
-	X_train_raw = X[:train_size]
-	y_train_raw = y[:train_size]
-	X_val_raw = X[train_size:train_size+val_size]
-	y_val_raw = y[train_size:train_size+val_size]
-	X_test_raw = X[train_size+val_size:]
-	y_test_raw = y[train_size+val_size:]
+	X_train_raw = X.iloc[:train_size]
+	y_train_raw = y.iloc[:train_size]
+	X_val_raw = X.iloc[train_size:train_size+val_size]
+	y_val_raw = y.iloc[train_size:train_size+val_size]
+	X_test_raw = X.iloc[train_size+val_size:]
+	y_test_raw = y.iloc[train_size+val_size:]
 
 	# Fit scalers ONLY on training data
 	scaler_X = StandardScaler()
 	scaler_y = StandardScaler()
 	scaler_X.fit(X_train_raw)
-	scaler_y.fit(y_train_raw.reshape(-1, 1))
+	scaler_y.fit(y_train_raw.values.reshape(-1, 1))
 
 	# Transform each split separately
 	X_train_scaled = scaler_X.transform(X_train_raw)
-	y_train_scaled = scaler_y.transform(y_train_raw.reshape(-1, 1)).flatten()
+	y_train_scaled = scaler_y.transform(y_train_raw.values.reshape(-1, 1)).flatten()
 	X_val_scaled = scaler_X.transform(X_val_raw)
-	y_val_scaled = scaler_y.transform(y_val_raw.reshape(-1, 1)).flatten()
+	y_val_scaled = scaler_y.transform(y_val_raw.values.reshape(-1, 1)).flatten()
 	X_test_scaled = scaler_X.transform(X_test_raw)
-	y_test_scaled = scaler_y.transform(y_test_raw.reshape(-1, 1)).flatten()
+	y_test_scaled = scaler_y.transform(y_test_raw.values.reshape(-1, 1)).flatten()
 
-	# Create sequences
-	X_train_seq, y_train_seq = create_sequences_rnn(X_train_scaled, y_train_scaled, timesteps)
-	X_val_seq, y_val_seq = create_sequences_rnn(X_val_scaled, y_val_scaled, timesteps)
-	X_test_seq, y_test_seq = create_sequences_rnn(X_test_scaled, y_test_scaled, timesteps)
+	# Create sequences AFTER scaling (prevents leakage)
+	X_train_seq, y_train_seq = create_sequences(X_train_scaled, y_train_scaled, timesteps)
+	X_val_seq, y_val_seq = create_sequences(X_val_scaled, y_val_scaled, timesteps)
+	X_test_seq, y_test_seq = create_sequences(X_test_scaled, y_test_scaled, timesteps)
 
 	splits = {
 		'X_train': tf.convert_to_tensor(X_train_seq, dtype=tf.float32),
@@ -121,7 +130,7 @@ def prepare_data(df, target_col, timesteps):
 
 def train_single_model(splits, scaler_y, architecture, batch_size, config):
 	"""Train a single model configuration"""
-	model = MLPModel(architecture, config['dropout_rate'])
+	model = RNNModel(architecture, config['dropout_rate'])
 	model.compile(optimizer=Adam(learning_rate=config['learning_rate']), loss='mse')
 
 	# Early stopping
@@ -160,78 +169,44 @@ def train_single_model(splits, scaler_y, architecture, batch_size, config):
 
 
 def run_optimization(data, target_col, config):
-	"""Run optimization with simple architecture pruning"""
-	print(f"\n{'='*80}")
-	print(f"RNN OPTIMIZATION WITH EARLY PRUNING (DATA-ONLY)")
-	print(f"Dataset: REGULAR | Prune threshold: Val R² < {config['prune_threshold']}")
-	print(f"{'='*80}")
+	"""Run optimization over all architecture and batch size combinations"""
+	print(f"\n{'='*70}")
+	print(f"RNN OPTIMIZATION - DATA-ONLY MODEL (physics_weight=0.0)")
+	print(f"Dataset: REGULAR (no weather features)")
+	print(f"{'='*70}")
 
 	splits, scaler_y = prepare_data(data, target_col, config['timesteps'])
 
-	print(f"\nTrain: {len(splits['X_train'])}, Val: {len(splits['X_val'])}, Test: {len(splits['X_test'])}")
-	print(f"\nTesting {len(config['architectures'])} architectures × {len(config['batch_sizes'])} batch sizes")
+	print(f"Train samples: {len(splits['X_train'])}")
+	print(f"Val samples: {len(splits['X_val'])}")
+	print(f"Test samples: {len(splits['X_test'])}")
 
 	results = []
-	tested = 0
-	skipped = 0
+	total_configs = len(config['architectures']) * len(config['batch_sizes'])
+	current = 0
 
 	for arch in config['architectures']:
-		# Test with smallest batch size first
-		first_batch = config['batch_sizes'][0]
-
-		tested += 1
-		print(f"\n[{tested}] Architecture: {arch}, Batch: {first_batch}")
-
-		result = train_single_model(splits, scaler_y, arch, first_batch, config)
-		results.append(result)
-
-		val_r2 = result['val']['r2']
-		test_r2 = result['test']['r2']
-		print(f"  Val R²: {val_r2:.4f}, Test R²: {test_r2:.4f}, MSE: {result['test']['mse']:.2f}")
-
-		# Early pruning: if first batch performs poorly, skip other batches
-		if val_r2 < config['prune_threshold']:
-			skipped_batches = len(config['batch_sizes']) - 1
-			skipped += skipped_batches
-			print(f"  ⚠️  PRUNED: Skipping {skipped_batches} remaining batch sizes (Val R² < {config['prune_threshold']})")
-			continue
-
-		# Test remaining batch sizes
-		for batch_size in config['batch_sizes'][1:]:
-			tested += 1
-			print(f"\n[{tested}] Architecture: {arch}, Batch: {batch_size}")
+		for batch_size in config['batch_sizes']:
+			current += 1
+			print(f"\n[{current}/{total_configs}] Training: arch={arch}, batch={batch_size}")
 
 			result = train_single_model(splits, scaler_y, arch, batch_size, config)
 			results.append(result)
 
-			print(f"  Val R²: {result['val']['r2']:.4f}, Test R²: {result['test']['r2']:.4f}, MSE: {result['test']['mse']:.2f}")
-
-	# Summary
-	print(f"\n{'='*80}")
-	print("OPTIMIZATION COMPLETE")
-	print(f"{'='*80}")
-	print(f"Tested: {tested} configurations")
-	print(f"Skipped: {skipped} configurations (early pruning)")
-	print(f"Total results: {len(results)}")
+			print(f"  Test R²: {result['test']['r2']:.4f}, MSE: {result['test']['mse']:.2f}, MAE: {result['test']['mae']:.2f}")
 
 	# Find best configuration
 	best_result = max(results, key=lambda x: x['test']['r2'])
-	print(f"\n{'='*80}")
-	print("BEST CONFIGURATION:")
-	print(f"{'='*80}")
+	print(f"\n{'='*70}")
+	print(f"BEST CONFIGURATION:")
 	print(f"  Architecture: {best_result['architecture']}")
 	print(f"  Batch size: {best_result['batch_size']}")
 	print(f"  Test R²: {best_result['test']['r2']:.4f}")
 	print(f"  Test MSE: {best_result['test']['mse']:.2f}")
 	print(f"  Test MAE: {best_result['test']['mae']:.2f}")
-	print(f"{'='*80}")
+	print(f"{'='*70}")
 
-	return {
-		'results': results,
-		'tested': tested,
-		'skipped': skipped,
-		'best_config': best_result
-	}
+	return results
 
 
 if __name__ == "__main__":
@@ -242,13 +217,13 @@ if __name__ == "__main__":
 		speed_trials_regular = pd.read_csv(regular_path)
 		target_col = 'OPC_12_CPP_ENGINE_POWER'
 
-		optimization_results = run_optimization(speed_trials_regular, target_col, CONFIG)
+		results = run_optimization(speed_trials_regular, target_col, CONFIG)
 
 		# Save results
 		timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-		output_file = f'{CONFIG["output_dir"]}/mlp_optimization_{timestamp}.json'
+		output_file = f'{CONFIG["output_dir"]}/rnn_optimization_clean_{timestamp}.json'
 		with open(output_file, 'w') as f:
-			json.dump(optimization_results, f, indent=2, default=str)
+			json.dump(results, f, indent=2)
 		print(f"\nResults saved to: {output_file}")
 	else:
 		print("ERROR: Run pre_process.py first!")

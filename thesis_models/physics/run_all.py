@@ -6,9 +6,9 @@ import subprocess
 import sys
 
 scripts = [
-	('LSTM', 'thesis_models/physics/lstm_optimization.py'),
-	('RNN', 'thesis_models/physics/rnn_optimization.py'),
-	('MLP', 'thesis_models/physics/mlp_optimization.py')
+	('LSTM', 'thesis_models/physics/lstm_optimization_clean.py'),
+	('RNN', 'thesis_models/physics/rnn_optimization_clean.py'),
+	('MLP', 'thesis_models/physics/mlp_optimization_clean.py')
 ]
 
 for name, script in scripts:
