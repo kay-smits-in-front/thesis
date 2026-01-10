@@ -204,6 +204,7 @@ class PINNTrainer:
 				total_loss = data_loss
 
 		gradients = tape.gradient(total_loss, self.model.trainable_variables)
+		gradients, _ = tf.clip_by_global_norm(gradients, 1.0)
 		self.optimizer.apply_gradients(zip(gradients, self.model.trainable_variables))
 		return total_loss, data_loss, physics_loss
 

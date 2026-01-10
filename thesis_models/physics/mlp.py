@@ -148,6 +148,7 @@ class MLPWithPhysics(keras.Model):
 				total_loss = data_loss
 
 		gradients = tape.gradient(total_loss, self.trainable_variables)
+		gradients, _ = tf.clip_by_global_norm(gradients, 1.0)
 		self.optimizer.apply_gradients(zip(gradients, self.trainable_variables))
 
 		return total_loss, data_loss, physics_loss
