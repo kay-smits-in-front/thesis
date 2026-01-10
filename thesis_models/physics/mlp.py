@@ -18,12 +18,11 @@ from carbontracker.tracker import CarbonTracker
 from datetime import datetime
 import json
 
-# Configuration - Best performing model
 CONFIG = {
 	'output_dir': 'model_performance',
 	'architecture': [128, 64, 32],
 	'batch_size': 16,
-	'physics_weights': [0.0, 0.01],  # Compare baseline vs best physics
+	'physics_weights': [0.0, 0.01],
 	'n_lags': 15,
 	'epochs': 20,
 	'patience': 7,
@@ -85,16 +84,15 @@ class MLPWithPhysics(keras.Model):
 		self.n_features = len(feature_cols)
 		self.architecture = architecture
 
-		self.column_mapping = {}
-		for i, col in enumerate(feature_cols):
-			if col == 'v_ms':
-				self.column_mapping['v'] = (n_lags - 1) * len(feature_cols) + i
-			elif col == 'OPC_07_WATER_SPEED':
-				self.column_mapping['u'] = (n_lags - 1) * len(feature_cols) + i
-			elif col == 'GPS_HDG_HEADING_ROT_S':
-				self.column_mapping['r'] = (n_lags - 1) * len(feature_cols) + i
-			elif col == 'OPC_40_PROP_RPM_FB':
-				self.column_mapping['nP'] = (n_lags - 1) * len(feature_cols) + i
+		u_base_idx = feature_cols.index('OPC_07_WATER_SPEED')
+		v_base_idx = feature_cols.index('v_ms')
+		r_base_idx = feature_cols.index('GPS_HDG_HEADING_ROT_S')
+		nP_base_idx = feature_cols.index('OPC_40_PROP_RPM_FB')
+
+		self.u_idx = (n_lags - 1) * len(feature_cols) + u_base_idx
+		self.v_idx = (n_lags - 1) * len(feature_cols) + v_base_idx
+		self.r_idx = (n_lags - 1) * len(feature_cols) + r_base_idx
+		self.nP_idx = (n_lags - 1) * len(feature_cols) + nP_base_idx
 
 		self.scaler_X_mean = tf.constant(scaler_X.mean_, dtype=tf.float32)
 		self.scaler_X_std = tf.constant(scaler_X.scale_, dtype=tf.float32)
@@ -116,15 +114,15 @@ class MLPWithPhysics(keras.Model):
 		return self.output_layer(x)
 
 	def compute_physics_loss(self, inputs, predictions):
-		u_scaled = inputs[:, self.column_mapping['u']]
-		v_scaled = inputs[:, self.column_mapping['v']] if 'v' in self.column_mapping else tf.zeros_like(inputs[:, 0])
-		r_scaled = inputs[:, self.column_mapping['r']]
-		nP_scaled = inputs[:, self.column_mapping['nP']]
+		u_scaled = inputs[:, self.u_idx]
+		v_scaled = inputs[:, self.v_idx]
+		r_scaled = inputs[:, self.r_idx]
+		nP_scaled = inputs[:, self.nP_idx]
 
-		u = u_scaled * self.scaler_X_std[self.column_mapping['u']] + self.scaler_X_mean[self.column_mapping['u']]
-		v = v_scaled * self.scaler_X_std[self.column_mapping['v']] + self.scaler_X_mean[self.column_mapping['v']] if 'v' in self.column_mapping else v_scaled
-		r = r_scaled * self.scaler_X_std[self.column_mapping['r']] + self.scaler_X_mean[self.column_mapping['r']]
-		nP = nP_scaled * self.scaler_X_std[self.column_mapping['nP']] + self.scaler_X_mean[self.column_mapping['nP']]
+		u = u_scaled * self.scaler_X_std[self.u_idx] + self.scaler_X_mean[self.u_idx]
+		v = v_scaled * self.scaler_X_std[self.v_idx] + self.scaler_X_mean[self.v_idx]
+		r = r_scaled * self.scaler_X_std[self.r_idx] + self.scaler_X_mean[self.r_idx]
+		nP = nP_scaled * self.scaler_X_std[self.nP_idx] + self.scaler_X_mean[self.nP_idx]
 
 		predicted_power_kW = predictions[:, 0] * self.scaler_y_std + self.scaler_y_mean
 		predicted_power_watts = predicted_power_kW * 1000.0
@@ -284,11 +282,9 @@ def evaluate_model(model, X, y, scaler_y, split_name, model_name):
 
 
 def prepare_data(df, target_col, n_lags, batch_size):
-	# CRITICAL: Create lag features first, then split BEFORE scaling
 	X, y, feature_cols = create_multivariate_lag_features(df, target_col, n_lags)
 	print(f"Samples: {len(y)}, Features: {X.shape[1]}")
 
-	# Split BEFORE scaling to prevent data leakage
 	train_size = int(len(X) * 0.6)
 	val_size = int(len(X) * 0.2)
 
@@ -299,13 +295,11 @@ def prepare_data(df, target_col, n_lags, batch_size):
 	X_test_raw = X[train_size+val_size:]
 	y_test_raw = y[train_size+val_size:]
 
-	# Fit scaler ONLY on train data
 	scaler_X = StandardScaler()
 	scaler_y = StandardScaler()
 	scaler_X.fit(X_train_raw)
 	scaler_y.fit(y_train_raw.reshape(-1, 1))
 
-	# Transform each split separately
 	X_train_scaled = scaler_X.transform(X_train_raw)
 	y_train_scaled = scaler_y.transform(y_train_raw.reshape(-1, 1)).flatten()
 	X_val_scaled = scaler_X.transform(X_val_raw)
@@ -390,7 +384,6 @@ if __name__ == "__main__":
 			print(f"Training with physics_weight = {physics_weight}")
 			print(f"{'='*70}")
 
-			# Create config copy with current physics weight
 			current_config = CONFIG.copy()
 			current_config['physics_weight'] = physics_weight
 
@@ -404,7 +397,6 @@ if __name__ == "__main__":
 			results_weather = train_model(speed_trials_weather, "Weather", target_col, current_config)
 			all_results.append(results_weather)
 
-		# Save results to JSON
 		timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
 		output_file = f'{CONFIG["output_dir"]}/mlp_results_{timestamp}.json'
 		with open(output_file, 'w') as f:

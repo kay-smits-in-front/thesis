@@ -18,13 +18,12 @@ from carbontracker.tracker import CarbonTracker
 from datetime import datetime
 import json
 
-# Configuration - Best performing model
 CONFIG = {
 	'output_dir': 'model_performance',
 	'layer1_units': 64,
 	'layer2_units': 32,
 	'batch_size': 32,
-	'physics_weights': [0.0, 0.001],  # Compare baseline vs best physics
+	'physics_weights': [0.0, 0.001],
 	'timesteps': 15,
 	'epochs': 15,
 	'patience': 7,
@@ -88,9 +87,9 @@ class RNN_PINN(keras.Model):
 
 
 class PINNTrainer:
-	def __init__(self, model, column_mapping, scaler_X, scaler_y, physics_weight, learning_rate):
+	def __init__(self, model, column_indices, scaler_X, scaler_y, physics_weight, learning_rate):
 		self.model = model
-		self.column_mapping = column_mapping
+		self.u_idx, self.v_idx, self.r_idx, self.nP_idx = column_indices
 		self.physics_weight = physics_weight
 		self.optimizer = Adam(learning_rate=learning_rate)
 
@@ -100,15 +99,15 @@ class PINNTrainer:
 		self.scaler_y_std = tf.constant(scaler_y.scale_[0], dtype=tf.float32)
 
 	def descale_features(self, inputs):
-		u_scaled = inputs[:, -1, self.column_mapping['u']]
-		v_scaled = inputs[:, -1, self.column_mapping['v']]
-		r_scaled = inputs[:, -1, self.column_mapping['r']]
-		nP_scaled = inputs[:, -1, self.column_mapping['nP']]
+		u_scaled = inputs[:, -1, self.u_idx]
+		v_scaled = inputs[:, -1, self.v_idx]
+		r_scaled = inputs[:, -1, self.r_idx]
+		nP_scaled = inputs[:, -1, self.nP_idx]
 
-		u = u_scaled * self.scaler_X_std[self.column_mapping['u']] + self.scaler_X_mean[self.column_mapping['u']]
-		v = v_scaled * self.scaler_X_std[self.column_mapping['v']] + self.scaler_X_mean[self.column_mapping['v']]
-		r = r_scaled * self.scaler_X_std[self.column_mapping['r']] + self.scaler_X_mean[self.column_mapping['r']]
-		nP = nP_scaled * self.scaler_X_std[self.column_mapping['nP']] + self.scaler_X_mean[self.column_mapping['nP']]
+		u = u_scaled * self.scaler_X_std[self.u_idx] + self.scaler_X_mean[self.u_idx]
+		v = v_scaled * self.scaler_X_std[self.v_idx] + self.scaler_X_mean[self.v_idx]
+		r = r_scaled * self.scaler_X_std[self.r_idx] + self.scaler_X_mean[self.r_idx]
+		nP = nP_scaled * self.scaler_X_std[self.nP_idx] + self.scaler_X_mean[self.nP_idx]
 
 		return u, v, r, nP
 
@@ -282,7 +281,6 @@ def prepare_data(data, target_col, timesteps, batch_size):
 
 	print(f"Features: {len(feature_cols)}, Samples: {len(y)}")
 
-	# CRITICAL: Split BEFORE scaling to prevent data leakage
 	train_size = int(len(X) * 0.6)
 	val_size = int(len(X) * 0.2)
 
@@ -293,13 +291,11 @@ def prepare_data(data, target_col, timesteps, batch_size):
 	X_test_raw = X.iloc[train_size+val_size:]
 	y_test_raw = y.iloc[train_size+val_size:]
 
-	# Fit scaler ONLY on train data
 	scaler_X = StandardScaler()
 	scaler_y = StandardScaler()
 	scaler_X.fit(X_train_raw)
 	scaler_y.fit(y_train_raw.values.reshape(-1, 1))
 
-	# Transform each split separately
 	X_train_scaled = scaler_X.transform(X_train_raw)
 	y_train_scaled = scaler_y.transform(y_train_raw.values.reshape(-1, 1)).flatten()
 	X_val_scaled = scaler_X.transform(X_val_raw)
@@ -307,22 +303,14 @@ def prepare_data(data, target_col, timesteps, batch_size):
 	X_test_scaled = scaler_X.transform(X_test_raw)
 	y_test_scaled = scaler_y.transform(y_test_raw.values.reshape(-1, 1)).flatten()
 
-	# Create overlapping sequences for each split (stride=1)
 	X_train_seq, y_train_seq = create_sequences(X_train_scaled, y_train_scaled, timesteps)
 	X_val_seq, y_val_seq = create_sequences(X_val_scaled, y_val_scaled, timesteps)
 	X_test_seq, y_test_seq = create_sequences(X_test_scaled, y_test_scaled, timesteps)
 
-	# Column mapping for physics
-	column_mapping = {}
-	for i, col in enumerate(feature_cols):
-		if col == 'v_ms':
-			column_mapping['v'] = i
-		elif col == 'OPC_07_WATER_SPEED':
-			column_mapping['u'] = i
-		elif col == 'GPS_HDG_HEADING_ROT_S':
-			column_mapping['r'] = i
-		elif col == 'OPC_40_PROP_RPM_FB':
-			column_mapping['nP'] = i
+	u_idx = feature_cols.index('OPC_07_WATER_SPEED')
+	v_idx = feature_cols.index('v_ms')
+	r_idx = feature_cols.index('GPS_HDG_HEADING_ROT_S')
+	nP_idx = feature_cols.index('OPC_40_PROP_RPM_FB')
 
 	splits = {
 		'X_train': tf.convert_to_tensor(X_train_seq, dtype=tf.float32),
@@ -333,11 +321,11 @@ def prepare_data(data, target_col, timesteps, batch_size):
 		'y_test': tf.convert_to_tensor(y_test_seq, dtype=tf.float32)
 	}
 
-	return splits, scaler_X, scaler_y, column_mapping
+	return splits, scaler_X, scaler_y, (u_idx, v_idx, r_idx, nP_idx)
 
 
 def train_model(data, dataset_name, target_col, config):
-	splits, scaler_X, scaler_y, column_mapping = prepare_data(
+	splits, scaler_X, scaler_y, column_indices = prepare_data(
 		data, target_col, config['timesteps'], config['batch_size']
 	)
 
@@ -356,7 +344,7 @@ def train_model(data, dataset_name, target_col, config):
 	}
 
 	model = RNN_PINN(rnn_config)
-	trainer = PINNTrainer(model, column_mapping, scaler_X, scaler_y,
+	trainer = PINNTrainer(model, column_indices, scaler_X, scaler_y,
 	                      config['physics_weight'], config['learning_rate'])
 	history = trainer.fit(splits['X_train'], splits['y_train'], splits['X_val'], splits['y_val'],
 	                      config['epochs'], config['batch_size'], config['patience'])
@@ -400,7 +388,6 @@ if __name__ == "__main__":
 			print(f"Training with physics_weight = {physics_weight}")
 			print(f"{'='*70}")
 
-			# Create config copy with current physics weight
 			current_config = CONFIG.copy()
 			current_config['physics_weight'] = physics_weight
 
@@ -414,7 +401,6 @@ if __name__ == "__main__":
 			results_weather = train_model(speed_trials_weather, "Weather", target_col, current_config)
 			all_results.append(results_weather)
 
-		# Save results to JSON
 		timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
 		output_file = f'{CONFIG["output_dir"]}/rnn_results_{timestamp}.json'
 		with open(output_file, 'w') as f:
