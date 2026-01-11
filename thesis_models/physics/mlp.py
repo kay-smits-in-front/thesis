@@ -127,13 +127,15 @@ class MLPWithPhysics(keras.Model):
 		r = r_scaled * self.scaler_X_std[self.r_idx] + self.scaler_X_mean[self.r_idx]
 		nP = nP_scaled * self.scaler_X_std[self.nP_idx] + self.scaler_X_mean[self.nP_idx]
 
-		predicted_power_kW = predictions[:, 0] * self.scaler_y_std + self.scaler_y_mean
-		predicted_power_watts = predicted_power_kW * 1000.0
+		model_power_kW = predictions[:, 0] * self.scaler_y_std + self.scaler_y_mean
 
 		XP = compute_propeller_force_tf(u, v, r, nP)
-		predicted_thrust = predicted_power_watts / (tf.abs(u) + 1e-6)
-		physics_residual = tf.reduce_mean(tf.square((XP - predicted_thrust) / 1e6))
+		wP = SHIP_PARAMS['wP0'] * tf.exp(-4 * (tf.math.atan2(-v, u) - SHIP_PARAMS['xP_prime'] *
+		                                            tf.where(tf.abs(u) > 1e-6, r * SHIP_PARAMS['L'] / u, 0.0))**2)
+		uP = u * (1 - wP)
+		physics_power_kW = (XP * uP) / 1000.0
 
+		physics_residual = tf.reduce_mean(tf.square((physics_power_kW - model_power_kW) / 1000.0))
 		return physics_residual
 
 	@tf.function
