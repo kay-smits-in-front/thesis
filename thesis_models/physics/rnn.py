@@ -18,12 +18,13 @@ from carbontracker.tracker import CarbonTracker
 from datetime import datetime
 import json
 
+# Configuration - Best performing: [128,64,32] triple-layer architecture, batch_size 16
+# Optimization results: Test R²=0.751, Val R²=0.917, Train R²=0.986
 CONFIG = {
 	'output_dir': 'model_performance',
-	'layer1_units': 64,
-	'layer2_units': 32,
-	'batch_size': 32,
-	'physics_weights': [0.0, 0.001],
+	'architecture': [128, 64, 32],  # Best performing triple-layer architecture
+	'batch_size': 16,
+	'physics_weights': [0.001, 0.01],
 	'timesteps': 15,
 	'epochs': 15,
 	'patience': 7,
@@ -70,19 +71,23 @@ def create_sequences(X, y, timesteps):
 
 
 class RNN_PINN(keras.Model):
-	def __init__(self, rnn_config):
+	def __init__(self, architecture, dropout_rate):
 		super().__init__()
-		self.rnn1 = SimpleRNN(rnn_config['layer1_units'], return_sequences=True)
-		self.dropout1 = Dropout(rnn_config['dropout_rate'])
-		self.rnn2 = SimpleRNN(rnn_config['layer2_units'], return_sequences=False)
-		self.dropout2 = Dropout(rnn_config['dropout_rate'])
+		self.rnn_layers = []
+		self.dropout_layers = []
+
+		for i, units in enumerate(architecture):
+			return_sequences = (i < len(architecture) - 1)
+			self.rnn_layers.append(SimpleRNN(units, return_sequences=return_sequences))
+			self.dropout_layers.append(Dropout(dropout_rate))
+
 		self.output_layer = Dense(1)
 
 	def call(self, inputs):
-		x = self.rnn1(inputs)
-		x = self.dropout1(x)
-		x = self.rnn2(x)
-		x = self.dropout2(x)
+		x = inputs
+		for rnn, dropout in zip(self.rnn_layers, self.dropout_layers):
+			x = rnn(x)
+			x = dropout(x)
 		return self.output_layer(x)
 
 
@@ -332,19 +337,13 @@ def train_model(data, dataset_name, target_col, config):
 
 	model_name = f"RNN_PINN_{dataset_name}"
 
-	print(f"\nTraining RNN with units [{config['layer1_units']}, {config['layer2_units']}]")
+	print(f"\nTraining RNN with architecture {config['architecture']}")
 	print(f"Batch size: {config['batch_size']}, Physics weight: {config['physics_weight']}")
 
 	tracker = CarbonTracker(epochs=1)
 	tracker.epoch_start()
 
-	rnn_config = {
-		'layer1_units': config['layer1_units'],
-		'layer2_units': config['layer2_units'],
-		'dropout_rate': config['dropout_rate']
-	}
-
-	model = RNN_PINN(rnn_config)
+	model = RNN_PINN(config['architecture'], config['dropout_rate'])
 	trainer = PINNTrainer(model, column_indices, scaler_X, scaler_y,
 	                      config['physics_weight'], config['learning_rate'])
 	history = trainer.fit(splits['X_train'], splits['y_train'], splits['X_val'], splits['y_val'],
@@ -363,7 +362,7 @@ def train_model(data, dataset_name, target_col, config):
 
 	return {
 		'dataset': dataset_name,
-		'architecture': [config['layer1_units'], config['layer2_units']],
+		'architecture': config['architecture'],
 		'batch_size': config['batch_size'],
 		'physics_weight': config['physics_weight'],
 		'metrics': {

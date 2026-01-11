@@ -18,11 +18,14 @@ from carbontracker.tracker import CarbonTracker
 from datetime import datetime
 import json
 
+# Configuration - Best performing: [64] single-layer architecture, batch_size 16
+# Optimization results: Test R²=0.754, Val R²=0.918, Train R²=0.974
+# BEST OVERALL MODEL - lowest overfitting (0.220 gap)
 CONFIG = {
 	'output_dir': 'model_performance',
-	'architecture': [128, 64, 32],
+	'architecture': [64],  # Best performing single-layer architecture
 	'batch_size': 16,
-	'physics_weights': [0.0, 0.01],
+	'physics_weights': [0.0, 0.001, 0.01],
 	'n_lags': 15,
 	'epochs': 20,
 	'patience': 7,

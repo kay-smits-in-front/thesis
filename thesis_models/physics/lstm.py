@@ -18,14 +18,14 @@ from carbontracker.tracker import CarbonTracker
 from datetime import datetime
 import json
 
-# Configuration - Best performing model
+# Configuration - Best performing: [64] single-layer architecture, batch_size 16
+# Optimization results: Test R²=0.721, Val R²=0.891, Train R²=0.988
 CONFIG = {
 	'output_dir': 'model_performance',
-	'layer1_units': 64,
-	'layer2_units': 32,
-	'batch_size': 32,
-	'physics_weights': [0.0, 0.001],
-	'timesteps': 30,
+	'architecture': [64],  # Best performing single-layer architecture
+	'batch_size': 16,
+	'physics_weights': [0.001, 0.01],
+	'timesteps': 15,
 	'epochs': 20,
 	'patience': 7,
 	'learning_rate': 0.001,
@@ -63,19 +63,23 @@ def compute_propeller_force(u, v, r, nP, params):
 
 
 class LSTM_PINN(keras.Model):
-	def __init__(self, lstm_config):
+	def __init__(self, architecture, dropout_rate):
 		super().__init__()
-		self.lstm1 = LSTM(lstm_config['layer1_units'], return_sequences=True)
-		self.dropout1 = Dropout(lstm_config['dropout_rate'])
-		self.lstm2 = LSTM(lstm_config['layer2_units'], return_sequences=False)
-		self.dropout2 = Dropout(lstm_config['dropout_rate'])
+		self.lstm_layers = []
+		self.dropout_layers = []
+
+		for i, units in enumerate(architecture):
+			return_sequences = (i < len(architecture) - 1)
+			self.lstm_layers.append(LSTM(units, return_sequences=return_sequences))
+			self.dropout_layers.append(Dropout(dropout_rate))
+
 		self.output_layer = Dense(1)
 
 	def call(self, inputs):
-		x = self.lstm1(inputs)
-		x = self.dropout1(x)
-		x = self.lstm2(x)
-		x = self.dropout2(x)
+		x = inputs
+		for lstm, dropout in zip(self.lstm_layers, self.dropout_layers):
+			x = lstm(x)
+			x = dropout(x)
 		return self.output_layer(x)
 
 
@@ -341,19 +345,13 @@ def train_model(data, dataset_name, target_col, config):
 
 	model_name = f"LSTM_PINN_{dataset_name}"
 
-	print(f"\nTraining LSTM with units [{config['layer1_units']}, {config['layer2_units']}]")
+	print(f"\nTraining LSTM with architecture {config['architecture']}")
 	print(f"Batch size: {config['batch_size']}, Physics weight: {config['physics_weight']}")
 
 	tracker = CarbonTracker(epochs=1)
 	tracker.epoch_start()
 
-	lstm_config = {
-		'layer1_units': config['layer1_units'],
-		'layer2_units': config['layer2_units'],
-		'dropout_rate': config['dropout_rate']
-	}
-
-	model = LSTM_PINN(lstm_config)
+	model = LSTM_PINN(config['architecture'], config['dropout_rate'])
 	trainer = PINNTrainer(model, SHIP_PARAMS, column_indices, scaler_X, scaler_y,
 	                      config['physics_weight'], config['learning_rate'])
 	history = trainer.fit(splits['X_train'], splits['y_train'], splits['X_val'], splits['y_val'],
@@ -372,7 +370,7 @@ def train_model(data, dataset_name, target_col, config):
 
 	return {
 		'dataset': dataset_name,
-		'architecture': [config['layer1_units'], config['layer2_units']],
+		'architecture': config['architecture'],
 		'batch_size': config['batch_size'],
 		'physics_weight': config['physics_weight'],
 		'metrics': {
