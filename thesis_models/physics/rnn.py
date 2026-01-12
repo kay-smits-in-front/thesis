@@ -98,6 +98,10 @@ class PINNTrainer:
 		self.physics_weight = physics_weight
 		self.optimizer = Adam(learning_rate=learning_rate)
 
+		# Dynamic scaling for physics loss
+		self.physics_scale = tf.Variable(1.0, trainable=False, dtype=tf.float32)
+		self.scale_initialized = tf.Variable(False, trainable=False, dtype=tf.bool)
+
 		self.scaler_X_mean = tf.constant(scaler_X.mean_, dtype=tf.float32)
 		self.scaler_X_std = tf.constant(scaler_X.scale_, dtype=tf.float32)
 		self.scaler_y_mean = tf.constant(scaler_y.mean_[0], dtype=tf.float32)
@@ -117,16 +121,21 @@ class PINNTrainer:
 		return u, v, r, nP
 
 	def compute_physics_loss(self, inputs, predictions):
+		# Descale features from last timestep
 		u, v, r, nP = self.descale_features(inputs)
+
+		# Descale predictions to kW
 		model_power_kW = predictions[:, 0] * self.scaler_y_std + self.scaler_y_mean
 
+		# Compute physics-based power in kW
 		XP = compute_propeller_force(u, v, r, nP, SHIP_PARAMS)
 		wP = SHIP_PARAMS['wP0'] * tf.exp(-4 * (tf.math.atan2(-v, u) - SHIP_PARAMS['xP_prime'] *
 		                                            tf.where(tf.abs(u) > 1e-6, r * SHIP_PARAMS['L'] / u, 0.0))**2)
 		uP = u * (1 - wP)
 		physics_power_kW = (XP * uP) / 1000.0
 
-		physics_residual = tf.reduce_mean(tf.square((physics_power_kW - model_power_kW) / 1000.0))
+		# Compute residual - both are in kW, no double conversion
+		physics_residual = tf.reduce_mean(tf.square(physics_power_kW - model_power_kW))
 		return physics_residual
 
 	@tf.function
@@ -136,8 +145,18 @@ class PINNTrainer:
 			data_loss = tf.reduce_mean(tf.square(y_batch - predictions))
 
 			if self.physics_weight > 0:
-				physics_loss = self.compute_physics_loss(X_batch, predictions)
-				total_loss = data_loss + self.physics_weight * physics_loss
+				physics_loss_raw = self.compute_physics_loss(X_batch, predictions)
+
+				# Initialize scale on first batch to make physics loss proportional to data loss
+				if not self.scale_initialized:
+					scale = data_loss / (physics_loss_raw + 1e-8)
+					self.physics_scale.assign(scale)
+					self.scale_initialized.assign(True)
+
+				# Apply proportional scaling then physics weight
+				physics_loss_scaled = physics_loss_raw * self.physics_scale
+				total_loss = data_loss + self.physics_weight * physics_loss_scaled
+				physics_loss = physics_loss_scaled
 			else:
 				physics_loss = tf.constant(0.0)
 				total_loss = data_loss
