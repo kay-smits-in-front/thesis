@@ -98,14 +98,24 @@ class PINNTrainer:
 		self.physics_weight = physics_weight
 		self.optimizer = Adam(learning_rate=learning_rate)
 
-		# Dynamic scaling for physics loss
-		self.physics_scale = tf.Variable(1.0, trainable=False, dtype=tf.float32)
-		self.scale_initialized = tf.Variable(False, trainable=False, dtype=tf.bool)
-
 		self.scaler_X_mean = tf.constant(scaler_X.mean_, dtype=tf.float32)
 		self.scaler_X_std = tf.constant(scaler_X.scale_, dtype=tf.float32)
 		self.scaler_y_mean = tf.constant(scaler_y.mean_[0], dtype=tf.float32)
 		self.scaler_y_std = tf.constant(scaler_y.scale_[0], dtype=tf.float32)
+
+		# Physics loss scale (will be initialized before training)
+		self.physics_scale = 1.0
+
+	def initialize_physics_scale(self, X_batch, y_batch):
+		"""Initialize physics scale using first batch to make physics loss proportional to data loss."""
+		if self.physics_weight > 0:
+			predictions = self.model(X_batch, training=False)
+			data_loss = tf.reduce_mean(tf.square(y_batch - predictions))
+			physics_loss_raw = self.compute_physics_loss(X_batch, predictions)
+			self.physics_scale = float((data_loss / (physics_loss_raw + 1e-8)).numpy())
+			print(f"Physics scale initialized: {self.physics_scale:.2e} (data_loss={float(data_loss):.4f}, physics_raw={float(physics_loss_raw):.2e})")
+		else:
+			self.physics_scale = 1.0
 
 	def descale_features(self, inputs):
 		u_scaled = inputs[:, -1, self.u_idx]
@@ -146,14 +156,7 @@ class PINNTrainer:
 
 			if self.physics_weight > 0:
 				physics_loss_raw = self.compute_physics_loss(X_batch, predictions)
-
-				# Initialize scale on first batch to make physics loss proportional to data loss
-				if not self.scale_initialized:
-					scale = data_loss / (physics_loss_raw + 1e-8)
-					self.physics_scale.assign(scale)
-					self.scale_initialized.assign(True)
-
-				# Apply proportional scaling then physics weight
+				# Apply scale (initialized before training) then physics weight
 				physics_loss_scaled = physics_loss_raw * self.physics_scale
 				total_loss = data_loss + self.physics_weight * physics_loss_scaled
 				physics_loss = physics_loss_scaled
@@ -174,6 +177,10 @@ class PINNTrainer:
 		best_val_loss = float('inf')
 		patience_counter = 0
 
+		# Initialize physics scale using first batch
+		first_batch = next(iter(train_dataset))
+		self.initialize_physics_scale(first_batch[0], first_batch[1])
+
 		for epoch in range(epochs):
 			epoch_loss, epoch_data_loss, epoch_physics_loss = [], [], []
 
@@ -186,7 +193,8 @@ class PINNTrainer:
 			val_pred = self.model(X_val, training=False)
 			val_data_loss = tf.reduce_mean(tf.square(y_val - val_pred))
 			if self.physics_weight > 0:
-				val_physics_loss = self.compute_physics_loss(X_val, val_pred)
+				val_physics_loss_raw = self.compute_physics_loss(X_val, val_pred)
+				val_physics_loss = val_physics_loss_raw * self.physics_scale
 			else:
 				val_physics_loss = tf.constant(0.0)
 			val_total_loss = val_data_loss + self.physics_weight * val_physics_loss
