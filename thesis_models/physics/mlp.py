@@ -87,7 +87,7 @@ class MLPWithPhysics(keras.Model):
 		self.n_features = len(feature_cols)
 		self.architecture = architecture
 
-		# Physics loss scale (will be initialized before training)
+		# Physics loss scale (dynamically updated each epoch)
 		self.physics_scale = 1.0
 
 		u_base_idx = feature_cols.index('OPC_07_WATER_SPEED')
@@ -112,17 +112,6 @@ class MLPWithPhysics(keras.Model):
 				self.dense_layers.append(Dropout(CONFIG['dropout_rate']))
 
 		self.output_layer = Dense(1)
-
-	def initialize_physics_scale(self, X_batch, y_batch):
-		"""Initialize physics scale using first batch to make physics loss proportional to data loss."""
-		if self.physics_weight > 0:
-			predictions = self(X_batch, training=False)
-			data_loss = tf.reduce_mean(tf.square(y_batch - predictions))
-			physics_loss_raw = self.compute_physics_loss(X_batch, predictions)
-			self.physics_scale = float((data_loss / (physics_loss_raw + 1e-8)).numpy())
-			print(f"Physics scale initialized: {self.physics_scale:.2e} (data_loss={float(data_loss):.4f}, physics_raw={float(physics_loss_raw):.2e})")
-		else:
-			self.physics_scale = 1.0
 
 	def call(self, inputs):
 		x = inputs
@@ -253,11 +242,25 @@ def train_with_tracking(model, X_train, y_train, X_val, y_val, epochs, batch_siz
 	best_val_loss = float('inf')
 	patience_counter = 0
 
-	# Initialize physics scale using first batch
-	first_batch = next(iter(train_dataset))
-	model.initialize_physics_scale(first_batch[0], first_batch[1])
-
 	for epoch in range(epochs):
+		# Update physics scale at START of epoch based on current model state
+		if model.physics_weight > 0:
+			# Sample a few batches to estimate current loss magnitudes
+			sample_data_loss, sample_physics_loss_raw = [], []
+			for i, (X_batch, y_batch) in enumerate(train_dataset):
+				if i >= 3:  # Use first 3 batches to estimate
+					break
+				predictions = model(X_batch, training=False)
+				data_loss_raw = tf.reduce_mean(tf.square(y_batch - predictions))
+				physics_loss_raw = model.compute_physics_loss(X_batch, predictions)
+				sample_data_loss.append(float(data_loss_raw))
+				sample_physics_loss_raw.append(float(physics_loss_raw))
+
+			avg_data_loss = np.mean(sample_data_loss)
+			avg_physics_loss_raw = np.mean(sample_physics_loss_raw)
+			model.physics_scale = avg_data_loss / (avg_physics_loss_raw + 1e-8)
+			print(f"Epoch {epoch+1}: Updated physics scale = {model.physics_scale:.2e} (data={avg_data_loss:.4f}, physics_raw={avg_physics_loss_raw:.2e})")
+
 		epoch_loss, epoch_data_loss, epoch_physics_loss = [], [], []
 
 		for X_batch, y_batch in train_dataset:
